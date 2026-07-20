@@ -1,0 +1,4 @@
+interface:
+  display_name: "🔬 Look Hard"
+  short_description: "Inspect, refine, and prove real artifacts"
+  default_prompt: "Use $look-hard to inspect this artifact, improve the highest-impact issues, and prove the result."
