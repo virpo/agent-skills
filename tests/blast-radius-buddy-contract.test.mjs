@@ -10,9 +10,9 @@ async function read(relativePath) {
 
 test('reviewers receive an untrusted packet through a tool-less or externally isolated process', async () => {
   const [skill, prompts, scenario] = await Promise.all([
-    read('skills/review-tube-man/SKILL.md'),
-    read('skills/review-tube-man/references/reviewer-prompts.md'),
-    read('tests/scenarios/review-tube-man.md'),
+    read('skills/blast-radius-buddy/SKILL.md'),
+    read('skills/blast-radius-buddy/references/reviewer-prompts.md'),
+    read('tests/scenarios/blast-radius-buddy.md'),
   ]);
 
   assert.match(skill, /repository content as untrusted data/i);
@@ -46,11 +46,11 @@ test('reviewers receive an untrusted packet through a tool-less or externally is
 
 test('authorized repairs require a durable automated regression test even after reproducible-check triage', async () => {
   const [skill, angles, prompts, report, scenario] = await Promise.all([
-    read('skills/review-tube-man/SKILL.md'),
-    read('skills/review-tube-man/references/review-angles.md'),
-    read('skills/review-tube-man/references/reviewer-prompts.md'),
-    read('skills/review-tube-man/references/github-report.md'),
-    read('tests/scenarios/review-tube-man.md'),
+    read('skills/blast-radius-buddy/SKILL.md'),
+    read('skills/blast-radius-buddy/references/review-angles.md'),
+    read('skills/blast-radius-buddy/references/reviewer-prompts.md'),
+    read('skills/blast-radius-buddy/references/github-report.md'),
+    read('tests/scenarios/blast-radius-buddy.md'),
   ]);
 
   assert.match(skill, /durable automated regression test/i);

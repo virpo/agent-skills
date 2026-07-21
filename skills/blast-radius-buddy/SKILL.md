@@ -1,9 +1,9 @@
 ---
-name: review-tube-man
+name: blast-radius-buddy
 description: Use when a pull request or branch was substantially written by a coding agent and needs a fresh high-impact review from a different coding agent.
 ---
 
-# 🧪 Review Tube Man
+# 🧨 Blast Radius Buddy
 
 ## Core rule
 

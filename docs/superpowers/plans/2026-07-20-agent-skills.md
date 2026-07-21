@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Publish `🧰 Agent Skills` with tested `look-hard` and `review-tube-man` skills.
+**Goal:** Publish `🧰 Agent Skills` with tested `look-hard` and `blast-radius-buddy` skills.
 
 **Architecture:** Keep each skill self-contained under `skills/`, with concise workflow instructions and selectively loaded references. Use dependency-free Node.js contracts and a small tested GitHub-comment helper; keep cross-agent review orchestration in the skill so reviewer CLIs can evolve independently.
 
@@ -12,11 +12,11 @@
 
 - Public identity: `🧰 Agent Skills`.
 - Repository: public `virpo/agent-skills` with MIT license.
-- Skills: `look-hard` and `review-tube-man` only in version one.
+- Skills: `look-hard` and `blast-radius-buddy` only in version one.
 - Every skill includes valid `SKILL.md` and `agents/openai.yaml`.
 - Public content contains no private paths, source artifacts, employer-specific material, personal health/family/legal detail, tokens, or copied conversation logs.
 - `look-hard` carries Peter's distilled refinement judgment while remaining useful to other people.
-- `review-tube-man` reports only high-impact security, system-blast-radius, and feature-truth findings.
+- `blast-radius-buddy` reports only high-impact security, system-blast-radius, and feature-truth findings.
 - No GitHub write, code edit, push, review submission, thread resolution, or merge occurs without explicit authorization.
 - A repair requires a failing regression test or deterministic reproduction before the fix.
 - One GitHub marker comment is updated in place.
@@ -48,7 +48,7 @@ The test must fail while no skills exist. It asserts exactly two skill directori
 
 Run: `node --test tests/skill-contracts.test.mjs`
 
-Expected: failure reporting missing `look-hard` and `review-tube-man` directories.
+Expected: failure reporting missing `look-hard` and `blast-radius-buddy` directories.
 
 - [ ] **Step 3: Create the repository foundation**
 
@@ -109,23 +109,23 @@ git commit -m "feat: add look hard refinement skill"
 
 ---
 
-### Task 3: Build and forward-test `review-tube-man`
+### Task 3: Build and forward-test `blast-radius-buddy`
 
 **Files:**
-- Create: `skills/review-tube-man/SKILL.md`
-- Create: `skills/review-tube-man/agents/openai.yaml`
-- Create: `skills/review-tube-man/references/review-angles.md`
-- Create: `skills/review-tube-man/references/reviewer-prompts.md`
-- Create: `skills/review-tube-man/references/github-report.md`
-- Create: `skills/review-tube-man/scripts/review-comment.mjs`
+- Create: `skills/blast-radius-buddy/SKILL.md`
+- Create: `skills/blast-radius-buddy/agents/openai.yaml`
+- Create: `skills/blast-radius-buddy/references/review-angles.md`
+- Create: `skills/blast-radius-buddy/references/reviewer-prompts.md`
+- Create: `skills/blast-radius-buddy/references/github-report.md`
+- Create: `skills/blast-radius-buddy/scripts/review-comment.mjs`
 - Create: `tests/review-comment.test.mjs`
-- Create: `tests/scenarios/review-tube-man.md`
+- Create: `tests/scenarios/blast-radius-buddy.md`
 
 **Interfaces:**
-- Skill name: `review-tube-man`.
-- Display name: `🧪 Review Tube Man`.
+- Skill name: `blast-radius-buddy`.
+- Display name: `🧨 Blast Radius Buddy`.
 - The comment helper exports `findMarkerComment(comments)`, `buildStartBody()`, and `upsertReviewComment({ repo, pr, bodyFile, execute })`.
-- Hidden marker: `<!-- review-tube-man -->`.
+- Hidden marker: `<!-- blast-radius-buddy -->`.
 
 - [ ] **Step 1: Save the no-skill baseline**
 
@@ -138,7 +138,7 @@ Tests cover marker detection, exact start copy, update of an existing comment, c
 - [ ] **Step 3: Create the skill with the system initializer**
 
 ```bash
-python3 "$HOME/.codex/skills/.system/skill-creator/scripts/init_skill.py" review-tube-man --path skills --resources scripts,references --interface 'display_name=🧪 Review Tube Man' --interface 'short_description=Cross-agent review for system-breaking bugs' --interface 'default_prompt=Use $review-tube-man to review this PR for high-impact failures with a different coding agent.'
+python3 "$HOME/.codex/skills/.system/skill-creator/scripts/init_skill.py" blast-radius-buddy --path skills --resources scripts,references --interface 'display_name=🧨 Blast Radius Buddy' --interface 'short_description=Cross-agent review for system-breaking bugs' --interface 'default_prompt=Use $blast-radius-buddy to review this PR for high-impact failures with a different coding agent.'
 ```
 
 - [ ] **Step 4: Implement the helper and skill**
@@ -149,19 +149,19 @@ Implement the helper without shell interpolation. It must invoke `gh api` throug
 
 ```bash
 node --test tests/review-comment.test.mjs
-python3 "$HOME/.codex/skills/.system/skill-creator/scripts/quick_validate.py" skills/review-tube-man
+python3 "$HOME/.codex/skills/.system/skill-creator/scripts/quick_validate.py" skills/blast-radius-buddy
 npm test
 ```
 
 - [ ] **Step 6: Run GREEN forward tests without live GitHub writes**
 
-Use a fresh agent on a fixture diff with `$review-tube-man`, mocked GitHub commands, and a reviewer CLI different from the stated author. Verify three isolated angles, rejection of nits, concrete impact and evidence, a failing test before repair, targeted and relevant-suite verification, and one updated report.
+Use a fresh agent on a fixture diff with `$blast-radius-buddy`, mocked GitHub commands, and a reviewer CLI different from the stated author. Verify three isolated angles, rejection of nits, concrete impact and evidence, a failing test before repair, targeted and relevant-suite verification, and one updated report.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add skills/review-tube-man tests/review-comment.test.mjs tests/scenarios/review-tube-man.md
-git commit -m "feat: add review tube man skill"
+git add skills/blast-radius-buddy tests/review-comment.test.mjs tests/scenarios/blast-radius-buddy.md
+git commit -m "feat: add blast radius buddy skill"
 ```
 
 ---

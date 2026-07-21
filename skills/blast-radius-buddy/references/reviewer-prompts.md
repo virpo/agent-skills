@@ -1,4 +1,4 @@
-# Reviewer CLI prompts
+# Isolated reviewer prompts
 
 ## Reviewer selection
 

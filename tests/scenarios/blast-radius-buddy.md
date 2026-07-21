@@ -1,4 +1,4 @@
-# Review Tube Man scenario
+# Blast Radius Buddy scenario
 
 ## No-skill baseline
 
@@ -13,7 +13,7 @@ The control produced strong domain-specific review logic and test ideas, but did
 
 ## Forward-test prompt
 
-State that the fixture was authored by Codex. Ask a fresh agent to use `$review-tube-man` to review a fixture pull-request diff containing:
+State that the fixture was authored by Codex. Ask a fresh agent to use `$blast-radius-buddy` to review a fixture pull-request diff containing:
 
 - one concrete high-impact adjacent-feature regression with a deterministic reproducible check but no regression test;
 - plausible naming and formatting nits that do not change behavior; and

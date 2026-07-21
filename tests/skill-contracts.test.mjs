@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 const root = new URL('../', import.meta.url).pathname;
-const expectedSkills = ['look-hard', 'review-tube-man'];
+const expectedSkills = ['blast-radius-buddy', 'look-hard'];
 
 async function readTree(directory) {
   const entries = await readdir(directory, { withFileTypes: true });

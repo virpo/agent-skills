@@ -1,4 +1,0 @@
-interface:
-  display_name: "🧪 Review Tube Man"
-  short_description: "Cross-agent review for system-breaking bugs"
-  default_prompt: "Use $review-tube-man to review this PR for high-impact failures with a different coding agent."

@@ -12,19 +12,19 @@ Inspect an existing user-facing artifact in its real form, improve the highest-i
 npx skills add virpo/agent-skills --skill look-hard
 ```
 
-### 🧪 Review Tube Man
+### 🧨 Blast Radius Buddy
 
 Cross-review agent-written code with a different coding agent. Hunt for security failures, system-wide breakage, and deep feature regressions; prove accepted findings with tests before fixing them.
 
 ```bash
-npx skills add virpo/agent-skills --skill review-tube-man
+npx skills add virpo/agent-skills --skill blast-radius-buddy
 ```
 
 ## Compatibility
 
 The skills use the open Agent Skills folder format. They are designed for Codex and Claude Code, and should work in other compatible agent harnesses.
 
-Review Tube Man expects:
+Blast Radius Buddy expects:
 
 - a git checkout;
 - GitHub CLI when PR reporting is explicitly requested; and

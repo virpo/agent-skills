@@ -5,9 +5,10 @@ import {
   buildStartBody,
   findMarkerComment,
   upsertReviewComment,
-} from '../skills/review-tube-man/scripts/review-comment.mjs';
+} from '../skills/blast-radius-buddy/scripts/review-comment.mjs';
 
-const MARKER = '<!-- review-tube-man -->';
+const NEW_MARKER = '<!-- blast-radius-buddy -->';
+const LEGACY_MARKER = '<!-- review-tube-man -->';
 
 function fakeExecute(responses) {
   const calls = [];
@@ -25,7 +26,7 @@ function fakeExecute(responses) {
 }
 
 test('findMarkerComment returns the marker comment', () => {
-  const markerComment = { id: 22, body: `Review running\n\n${MARKER}` };
+  const markerComment = { id: 22, body: `Review running\n\n${NEW_MARKER}` };
   const comments = [
     { id: 11, body: 'Unrelated review' },
     markerComment,
@@ -36,19 +37,32 @@ test('findMarkerComment returns the marker comment', () => {
   assert.equal(findMarkerComment([{ id: 11, body: 'No marker' }]), undefined);
 });
 
+test('findMarkerComment recognizes the legacy Review Tube Man marker', () => {
+  const legacyComment = { id: 22, body: `Review running\n\n${LEGACY_MARKER}` };
+
+  assert.equal(findMarkerComment([legacyComment]), legacyComment);
+});
+
+test('findMarkerComment prefers the Blast Radius Buddy marker during migration', () => {
+  const legacyComment = { id: 11, body: `Old review\n\n${LEGACY_MARKER}` };
+  const currentComment = { id: 22, body: `Current review\n\n${NEW_MARKER}` };
+
+  assert.equal(findMarkerComment([legacyComment, currentComment]), currentComment);
+});
+
 test('buildStartBody returns the exact approved start copy and marker', () => {
   assert.equal(
     buildStartBody(),
-    `I am going to review this. I will update this comment with findings.\n\n${MARKER}`,
+    `I am going to review this. I will update this comment with findings.\n\n${NEW_MARKER}`,
   );
 });
 
-test('upsertReviewComment updates the authenticated user marker comment', async () => {
-  const ownComment = { id: 42, body: `Old report\n\n${MARKER}`, user: { login: 'reviewer' } };
+test('upsertReviewComment updates the authenticated user legacy marker comment', async () => {
+  const ownComment = { id: 42, body: `Old report\n\n${LEGACY_MARKER}`, user: { login: 'reviewer' } };
   const { calls, execute } = fakeExecute([
     { login: 'reviewer' },
     [[
-      { id: 7, body: `Someone else's report\n\n${MARKER}`, user: { login: 'other' } },
+      { id: 7, body: `Someone else's report\n\n${NEW_MARKER}`, user: { login: 'other' } },
       ownComment,
     ]],
     { id: 42 },
@@ -86,7 +100,7 @@ test('upsertReviewComment creates one comment when the authenticated user has no
   const { calls, execute } = fakeExecute([
     { login: 'reviewer' },
     [[
-      { id: 7, body: `Someone else's report\n\n${MARKER}`, user: { login: 'other' } },
+      { id: 7, body: `Someone else's report\n\n${NEW_MARKER}`, user: { login: 'other' } },
       { id: 8, body: 'Ordinary comment', user: { login: 'reviewer' } },
     ]],
     { id: 91 },

@@ -9,23 +9,23 @@ GitHub comments are external writes. Use this path only after the user explicitl
 ```markdown
 I am going to review this. I will update this comment with findings.
 
-<!-- review-tube-man -->
+<!-- blast-radius-buddy -->
 ```
 
 2. Explicitly run:
 
 ```bash
-node skills/review-tube-man/scripts/review-comment.mjs write --repo OWNER/REPO --pr NUMBER --body-file START.md
+node skills/blast-radius-buddy/scripts/review-comment.mjs write --repo OWNER/REPO --pr NUMBER --body-file START.md
 ```
 
-3. Replace the local file with the final report below, preserving the marker, then run the same `write` command. The helper finds only the authenticated user's marker comment and updates it; otherwise it creates one.
+3. Replace the local file with the final report below, preserving the marker, then run the same `write` command. The helper finds only the authenticated user's marker comment and updates it; otherwise it creates one. It also recognizes the legacy `<!-- review-tube-man -->` marker so an upgraded run adopts the existing comment.
 
 Never call the helper merely because the skill was invoked. Never post separate progress comments.
 
 ## Final body
 
 ```markdown
-# 🧪 Review Tube Man
+# 🧨 Blast Radius Buddy
 
 **Verdict:** Blocking findings | Repaired findings | No high-impact findings
 **Revision:** BASE..HEAD
@@ -57,7 +57,7 @@ Never call the helper merely because the skill was invoked. Never post separate 
 
 Concrete unresolved risk, or `None observed within the bounded review.`
 
-<!-- review-tube-man -->
+<!-- blast-radius-buddy -->
 ```
 
 Omit the accepted-findings subsection only when none survive the gate. Do not add a suggestions section for rejected nits.

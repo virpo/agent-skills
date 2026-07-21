@@ -6,12 +6,17 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 
 const execFileAsync = promisify(execFile);
-const MARKER = '<!-- review-tube-man -->';
+const MARKER = '<!-- blast-radius-buddy -->';
+const LEGACY_MARKER = '<!-- review-tube-man -->';
 const START_COPY = 'I am going to review this. I will update this comment with findings.';
 
 export function findMarkerComment(comments) {
-  return comments.find(
+  const current = comments.find(
     (comment) => typeof comment?.body === 'string' && comment.body.includes(MARKER),
+  );
+
+  return current ?? comments.find(
+    (comment) => typeof comment?.body === 'string' && comment.body.includes(LEGACY_MARKER),
   );
 }
 

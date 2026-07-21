@@ -1,4 +1,4 @@
-# Review angles and finding gate
+# High-impact review angles and finding gate
 
 Run these as exactly three isolated reviewer contexts. Give each the same bounded packet, its single rubric, and the finding contract. Do not share another angle's output. Synthesis happens only after all three return.
 

@@ -2,14 +2,14 @@
 
 ## Goal
 
-Create a public `virpo/agent-skills` repository for judgment-heavy workflows distilled from repeated real projects. The first release contains `look-hard` and `review-tube-man`.
+Create a public `virpo/agent-skills` repository for judgment-heavy workflows distilled from repeated real projects. The first release contains `look-hard` and `blast-radius-buddy`.
 
 ## Product shape
 
 This is not a prompt dump. Each skill must own a recognizable task, an observable result, and a failure mode that capable agents still routinely miss.
 
 - `🔬 look-hard` improves an existing user-facing artifact by inspecting its real rendered or physical form, applying an opinionated refinement rubric, iterating, and proving the result.
-- `🧪 review-tube-man` cross-reviews agent-written code with a different coding agent, hunts only high-impact failures, proves accepted findings with tests or reproducible checks, fixes authorized findings, and maintains one GitHub review comment from start to finish.
+- `🧨 blast-radius-buddy` cross-reviews agent-written code with a different coding agent, hunts only high-impact failures, proves accepted findings with tests or reproducible checks, fixes authorized findings, and maintains one GitHub review comment from start to finish.
 
 The repository identity is `🧰 Agent Skills`.
 
@@ -27,7 +27,7 @@ agent-skills/
       agents/openai.yaml
       references/refinement-principles.md
       references/proof-matrix.md
-    review-tube-man/
+    blast-radius-buddy/
       SKILL.md
       agents/openai.yaml
       references/review-angles.md
@@ -77,7 +77,7 @@ The public rubric distills Peter's repeated corrections without exposing private
 - Sharp, concrete language beats corporate or AI-generated filler.
 - Before and after evidence must use comparable conditions.
 
-## `review-tube-man`
+## `blast-radius-buddy`
 
 ### Trigger boundary
 
@@ -143,7 +143,7 @@ The final report is short and evidence-led:
 Each skill is developed with a no-skill baseline and a with-skill forward test.
 
 - `look-hard` must cause an agent to inspect actual output, preserve a before state, rank changes, verify meaningful variants, and refuse unsupported readiness claims.
-- `review-tube-man` must ignore plausible nits, preserve angle isolation, require the finding gate, demonstrate red-green repair, and update one comment rather than posting several.
+- `blast-radius-buddy` must ignore plausible nits, preserve angle isolation, require the finding gate, demonstrate red-green repair, and update one comment rather than posting several.
 - The helper script receives mocked `gh` responses in unit tests; tests never write to a real GitHub repository.
 - A repository contract test validates frontmatter, names, required metadata, public-safe paths, and the absence of private source material.
 
