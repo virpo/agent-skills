@@ -1,9 +1,14 @@
 import assert from 'node:assert/strict';
+import { resolve } from 'node:path';
 import test from 'node:test';
 
 import {
-  buildStartBody,
+  buildCompletionBody,
+  buildFailureBody,
+  buildProgressBody,
+  buildStaleBody,
   findMarkerComment,
+  main,
   upsertReviewComment,
 } from '../skills/blast-radius-buddy/scripts/review-comment.mjs';
 
@@ -50,11 +55,67 @@ test('findMarkerComment prefers the Blast Radius Buddy marker during migration',
   assert.equal(findMarkerComment([legacyComment, currentComment]), currentComment);
 });
 
-test('buildStartBody returns the exact approved start copy and marker', () => {
+test('buildProgressBody uses the approved sentence and stage checklist', () => {
   assert.equal(
-    buildStartBody(),
-    `I am going to review this. I will update this comment with findings.\n\n${NEW_MARKER}`,
+    buildProgressBody({ headSha: 'abcdef012345', completedStages: ['review'] }),
+    [
+      '🧨 Blast Radius Buddy is giving `abcdef0` a careful shake; I\'ll keep this comment updated as the review moves.',
+      '',
+      '- [x] Three-angle review',
+      '- [ ] Finding validation',
+      '- [ ] Fresh-eyes verification',
+      '',
+      '<!-- blast-radius-buddy -->',
+    ].join('\n'),
   );
+});
+
+test('terminal marker bodies preserve the stable marker', () => {
+  assert.match(buildFailureBody({ headSha: 'abcdef0', reason: 'reviewer timed out' }), /could not complete.*reviewer timed out/s);
+  assert.match(buildStaleBody({ oldSha: 'abcdef0', newSha: '1234567' }), /moved from `abcdef0` to `1234567`/);
+  assert.match(buildCompletionBody({ headSha: 'abcdef0', reviewUrl: 'https://github.com/acme/widget/pull/3#pullrequestreview-9' }), /Review complete.*pullrequestreview-9/s);
+  for (const body of [
+    buildFailureBody({ headSha: 'abcdef0', reason: 'reviewer timed out' }),
+    buildStaleBody({ oldSha: 'abcdef0', newSha: '1234567' }),
+    buildCompletionBody({ headSha: 'abcdef0', reviewUrl: 'https://github.com/acme/widget/pull/3#pullrequestreview-9' }),
+  ]) assert.match(body, /<!-- blast-radius-buddy -->/);
+});
+
+test('main parses render options and writes the progress body', async () => {
+  const writes = [];
+  const output = './tmp/progress body.md';
+
+  await main(
+    [
+      'render',
+      '--state', 'progress',
+      '--head-sha', 'abcdef012345',
+      '--completed', 'review,validation',
+      '--output', output,
+    ],
+    { writeFile: async (...args) => writes.push(args) },
+  );
+
+  assert.deepEqual(writes, [[
+    resolve(output),
+    buildProgressBody({ headSha: 'abcdef012345', completedStages: ['review', 'validation'] }),
+    'utf8',
+  ]]);
+});
+
+test('main rejects invalid render options before writing', async () => {
+  const writes = [];
+  const dependencies = { writeFile: async (...args) => writes.push(args) };
+  const invalidArgs = [
+    ['render', '--state', 'unknown', '--output', './unknown.md'],
+    ['render', '--state', 'progress', '--head-sha', 'abcdef0', '--completed', 'review,unknown', '--output', './unknown-stage.md'],
+    ['render', '--state', 'failure', '--head-sha', 'abcdef0', '--output', './missing-reason.md'],
+  ];
+
+  for (const args of invalidArgs) {
+    await assert.rejects(main(args, dependencies));
+  }
+  assert.equal(writes.length, 0);
 });
 
 test('upsertReviewComment updates the authenticated user legacy marker comment', async () => {
