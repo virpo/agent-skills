@@ -79,6 +79,8 @@ The public rubric distills Peter's repeated corrections without exposing private
 
 ## `blast-radius-buddy`
 
+> Superseded for PR-review behavior by [the 2026-07-22 Blast Radius Buddy PR review design](2026-07-22-blast-radius-buddy-pr-review-design.md).
+
 ### Trigger boundary
 
 Use when a pull request or branch was substantially written by a coding agent and the user wants a fresh, high-impact review from a different coding agent. The user must explicitly authorize GitHub comments, code changes, pushes, or thread resolution.
