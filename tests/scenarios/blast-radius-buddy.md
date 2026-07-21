@@ -11,6 +11,49 @@ The control produced strong domain-specific review logic and test ideas, but did
 - isolate reviewers from untrusted repository configuration; or
 - turn a reproducible check into a durable regression test before repair.
 
+## Revised no-skill baseline
+
+### `clean-pr.md`
+
+```text
+Review event: `APPROVE`
+
+GitHub output:
+
+> Cache behavior matches the requirement: decisions expire after five minutes, and the key includes both `user.id` and `resource.id`, so a denial for one resource does not affect another. No blocking findings.
+
+Inline comments: none. No GitHub writes performed.
+```
+
+### `medium-regression.md`
+
+```text
+Review event: `REQUEST_CHANGES`
+
+GitHub review comment on the changed return line:
+
+> This makes `pageCount(20, 10)` return `1`, so the second full page becomes unreachable. `Math.ceil(total / pageSize)` already returns the correct one-indexed page count for exact multiples. Please remove the subtraction.
+
+No files or GitHub state changed.
+```
+
+### `stale-head.md`
+
+```text
+Abort the review as stale.
+
+- Reviewed head: `1111111111111111111111111111111111111111`
+- Current head before submission: `2222222222222222222222222222222222222222`
+- Review event: `STALE_HEAD` / skipped; rerun review on the new head.
+- GitHub output: none. Do not submit `APPROVE`, `COMMENT`, or `REQUEST_CHANGES`, since the no-findings result applies only to the old commit.
+```
+
+| fixture | observed gap | revised-skill assertion |
+| --- | --- | --- |
+| `clean-pr.md` | The control jumps straight to `Review event: APPROVE` after one unstructured assessment. It records no three-angle isolation, structured validation, fresh-eyes pass, or marker lifecycle, so the approval gates are unproven. | Run exactly three fresh isolated angles, reject any naming bait, complete structured validation and fresh-eyes verification, recheck the head SHA, update one marker through completion, and choose `APPROVE` only after every gate passes. |
+| `medium-regression.md` | The control finds the defect but chooses `Review event: REQUEST_CHANGES` and records neither isolated angles nor validation. | Report the pagination defect exactly once, reject the deliberate formatting bait, validate or narrow the finding, update one marker through completion, and submit `COMMENT`, never `REQUEST_CHANGES`. |
+| `stale-head.md` | The control correctly says `Abort the review as stale` but its `GitHub output: none` leaves no marker lifecycle or terminal stale status. | Replace the working marker with the exact old/new-SHA stale message, leave no working marker behind, and submit no native review. |
+
 ## Forward-test prompt
 
 State that the fixture was authored by Codex. Ask a fresh agent to use `$blast-radius-buddy` to review a fixture pull-request diff containing:
