@@ -15,23 +15,30 @@ const PR_FIELDS = [
   'number', 'url', 'title', 'body', 'baseRefOid', 'headRefOid',
   'author', 'files', 'statusCheckRollup', 'headRepositoryOwner',
 ].join(',');
+const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+function positiveSafeInteger(value) {
+  if (!/^\d+$/.test(String(value))) return undefined;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number > 0 ? number : undefined;
+}
 
 function parseTarget(target) {
   if (target === undefined) return {};
-  if (/^\d+$/.test(String(target)) && Number(target) > 0) {
-    return { number: Number(target) };
-  }
+  const number = positiveSafeInteger(target);
+  if (number !== undefined) return { number };
 
   const match = String(target).match(
     /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/,
   );
-  if (!match) {
+  const urlNumber = match ? positiveSafeInteger(match[3]) : undefined;
+  if (!match || urlNumber === undefined) {
     throw new TypeError('target must be a GitHub PR URL, positive PR number, or omitted');
   }
 
   return {
     repo: `${match[1]}/${match[2]}`,
-    number: Number(match[3]),
+    number: urlNumber,
     url: String(target),
   };
 }
@@ -51,7 +58,7 @@ async function currentRepo(execute) {
     await execute('gh', ['repo', 'view', '--json', 'nameWithOwner']),
     'repository',
   );
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(raw.nameWithOwner)) {
+  if (!REPO_PATTERN.test(raw.nameWithOwner)) {
     throw new Error('GitHub repository could not be resolved');
   }
   return raw.nameWithOwner;
@@ -169,6 +176,28 @@ function requireOption(options, name) {
   return value;
 }
 
+function validateRepo(value) {
+  if (!REPO_PATTERN.test(value)) {
+    throw new TypeError('repo must use OWNER/REPO format');
+  }
+  return value;
+}
+
+function validatePr(value) {
+  const number = positiveSafeInteger(value);
+  if (number === undefined) {
+    throw new TypeError('pr must be a positive safe integer');
+  }
+  return number;
+}
+
+function validateExpectedSha(value) {
+  if (!/^[0-9a-f]{7,64}$/i.test(value)) {
+    throw new TypeError('expected-sha must be a 7-64 character hexadecimal commit id');
+  }
+  return value;
+}
+
 export async function main(args, dependencies = {}) {
   const [command, ...rest] = args;
   const execute = dependencies.execute ?? defaultExecute;
@@ -181,9 +210,9 @@ export async function main(args, dependencies = {}) {
   } else if (command === 'check-head') {
     const options = readOptions(rest, new Set(['repo', 'pr', 'expected-sha']));
     result = await assertHeadUnchanged({
-      repo: requireOption(options, 'repo'),
-      number: requireOption(options, 'pr'),
-      expectedHeadSha: requireOption(options, 'expected-sha'),
+      repo: validateRepo(requireOption(options, 'repo')),
+      number: validatePr(requireOption(options, 'pr')),
+      expectedHeadSha: validateExpectedSha(requireOption(options, 'expected-sha')),
       execute,
     });
   } else {

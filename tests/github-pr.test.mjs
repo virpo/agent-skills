@@ -109,6 +109,45 @@ test('resolvePullRequest rejects malformed targets before invoking gh', async ()
   assert.equal(execute.calls.length, 0);
 });
 
+test('resolvePullRequest rejects non-safe standalone PR numbers before invoking gh', async () => {
+  const invalidTargets = [
+    '0',
+    '9007199254740992',
+    '9007199254740993',
+    '9'.repeat(400),
+  ];
+
+  for (const target of invalidTargets) {
+    const execute = fakeExecute([]);
+    await assert.rejects(
+      resolvePullRequest({ target, execute }),
+      new TypeError('target must be a GitHub PR URL, positive PR number, or omitted'),
+    );
+    assert.equal(execute.calls.length, 0);
+  }
+});
+
+test('resolvePullRequest rejects non-safe URL PR numbers before invoking gh', async () => {
+  const invalidNumbers = [
+    '0',
+    '9007199254740992',
+    '9007199254740993',
+    '9'.repeat(400),
+  ];
+
+  for (const number of invalidNumbers) {
+    const execute = fakeExecute([]);
+    await assert.rejects(
+      resolvePullRequest({
+        target: `https://github.com/acme/widget/pull/${number}`,
+        execute,
+      }),
+      new TypeError('target must be a GitHub PR URL, positive PR number, or omitted'),
+    );
+    assert.equal(execute.calls.length, 0);
+  }
+});
+
 test('assertHeadUnchanged throws a typed stale-head error', async () => {
   const execute = fakeExecute([{ stdout: JSON.stringify({ headRefOid: '2222222' }) }]);
 
@@ -167,6 +206,53 @@ test('main prints JSON for both read-only commands', async () => {
     `${JSON.stringify(RESOLVED_PR)}\n`,
     `${JSON.stringify(PR_VIEW.headRefOid)}\n`,
   ]);
+});
+
+test('check-head validates every CLI input before invoking gh', async () => {
+  const invalidCases = [
+    {
+      args: ['--repo', 'acme', '--pr', '19', '--expected-sha', 'abcdef0'],
+      error: new TypeError('repo must use OWNER/REPO format'),
+    },
+    {
+      args: ['--repo', 'acme/widget', '--pr', '0', '--expected-sha', 'abcdef0'],
+      error: new TypeError('pr must be a positive safe integer'),
+    },
+    {
+      args: [
+        '--repo', 'acme/widget',
+        '--pr', '9007199254740993',
+        '--expected-sha', 'abcdef0',
+      ],
+      error: new TypeError('pr must be a positive safe integer'),
+    },
+    {
+      args: [
+        '--repo', 'acme/widget',
+        '--pr', '9'.repeat(400),
+        '--expected-sha', 'abcdef0',
+      ],
+      error: new TypeError('pr must be a positive safe integer'),
+    },
+    {
+      args: ['--repo', 'acme/widget', '--pr', '19', '--expected-sha', 'abcdef'],
+      error: new TypeError('expected-sha must be a 7-64 character hexadecimal commit id'),
+    },
+    {
+      args: ['--repo', 'acme/widget', '--pr', '19', '--expected-sha', 'g234567'],
+      error: new TypeError('expected-sha must be a 7-64 character hexadecimal commit id'),
+    },
+    {
+      args: ['--repo', 'acme/widget', '--pr', '19', '--expected-sha', 'a'.repeat(65)],
+      error: new TypeError('expected-sha must be a 7-64 character hexadecimal commit id'),
+    },
+  ];
+
+  for (const { args, error } of invalidCases) {
+    const execute = fakeExecute([]);
+    await assert.rejects(main(['check-head', ...args], { execute }), error);
+    assert.equal(execute.calls.length, 0);
+  }
 });
 
 test('the executable prints exact errors on stderr', async () => {
