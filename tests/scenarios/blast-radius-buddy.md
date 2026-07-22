@@ -9,7 +9,7 @@ The control produced strong domain-specific review logic and test ideas, but did
 - create and update one GitHub marker comment;
 - automatically reject findings that fail a strict evidence gate; or
 - isolate reviewers from untrusted repository configuration; or
-- turn a reproducible check into a durable regression test before repair.
+- gate one native review event on structured validation and an unchanged head SHA.
 
 ## Revised no-skill baseline
 
