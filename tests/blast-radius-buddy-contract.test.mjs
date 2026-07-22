@@ -33,6 +33,10 @@ test('documents the native high-signal PR review contract', async () => {
     angles,
     /--angle.*assigned angle.*exactly one reporter.*matching.*assigned angle/is,
   );
+  assert.match(
+    angles,
+    /security-and-abuse.*system-blast-radius.*feature-truth-and-adjacent-regressions/is,
+  );
   assert.match(angles, /synthesi[sz]ed.*multiple.*unique.*approved.*angle/is);
   assert.match(
     prompts,
@@ -49,6 +53,18 @@ test('documents the native high-signal PR review contract', async () => {
   assert.match(
     prompts,
     /brb-reproduction.*--expected-ids-file.*600000/is,
+  );
+  assert.match(
+    prompts,
+    /First-pass recipe[\s\S]*one fenced `brb-review` block, with no prose before or after it/i,
+  );
+  assert.match(
+    prompts,
+    /Reproduction recipe[\s\S]*one fenced `brb-reproduction` block, with no prose before or after it/i,
+  );
+  assert.match(
+    prompts,
+    /Fresh-eyes recipe[\s\S]*one fenced `brb-verification` block, with no prose before or after it/i,
   );
   assert.match(validation, /clean.*only.*none.*never.*actionable/is);
   assert.match(
@@ -76,6 +92,15 @@ test('ships every deterministic PR review helper', async () => {
   await Promise.all(
     scripts.map((script) => access(new URL(`skills/blast-radius-buddy/scripts/${script}`, root))),
   );
+});
+
+test('the clean forward-test fixture has no hidden cache contract ambiguity', async () => {
+  const fixture = await read('tests/fixtures/blast-radius-buddy/clean-pr.md');
+
+  assert.match(fixture, /bounded TTL cache/i);
+  assert.match(fixture, /maximum of 10,000 entries/i);
+  assert.match(fixture, /JSON\.stringify\(\[user\.id, resource\.id\]\)/);
+  assert.match(fixture, /cached !== undefined/);
 });
 
 test('documents the exact normalized REPORT.json consumed by prepare', async () => {

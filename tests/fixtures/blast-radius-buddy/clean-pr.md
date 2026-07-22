@@ -2,13 +2,15 @@
 
 Requirement: cache authorization decisions for five minutes. The cache key must include both user and resource. A denial for one resource must not affect another.
 
+Repository context: `cache` is a bounded TTL cache with a maximum of 10,000 entries. `get` deletes expired entries, and `set(key, value, ttlMs)` applies the TTL and evicts the least-recently-used entry at capacity. User and resource IDs are arbitrary strings.
+
 ```diff
 -return policy.canAccess(user, resource);
-+const x = `${user.id}:${resource.id}`;
-+const cached = cache.get(x);
-+if (cached && cached.expiresAt > Date.now()) return cached.allowed;
++const k = JSON.stringify([user.id, resource.id]);
++const cached = cache.get(k);
++if (cached !== undefined) return cached;
 +const allowed = policy.canAccess(user, resource);
-+cache.set(x, { allowed, expiresAt: Date.now() + 300_000 });
++cache.set(k, allowed, 300_000);
 +return allowed;
 ```
 

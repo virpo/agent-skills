@@ -35,7 +35,7 @@ node skills/blast-radius-buddy/scripts/review-protocol.mjs validate \
 
 `--expected-ids-file` must contain a non-empty list of unique stable IDs. The validator rejects an empty model result, duplicate classifications, any omission, and any extra ID, then emits results in host selection order. Never trust model-returned IDs to define the selected set.
 
-End reproduction with only one fenced `brb-reproduction` block containing this exact envelope:
+Return only one fenced `brb-reproduction` block, with no prose before or after it, containing this exact envelope:
 
 ```brb-reproduction
 {"results":[{"id":"BRB001","verdict":"confirmed | narrowed | downgraded | unclear | refuted","severity":"critical | high | medium","evidence":"specific fact or command output","reason":"short classification reason","reportEffect":"actionable | deferred | drop"}]}
@@ -59,7 +59,7 @@ Do not start a fourth broad review. Classify the synthesis as:
 - `drop`: remove the challenged findings and recompute the event;
 - `clean`: uphold a clean synthesis for approval-gate evaluation.
 
-Apply each challenge's `reportEffect`: `actionable` keeps or changes a finding, `deferred` exposes material uncertainty, `drop` removes it, and `none` changes nothing. End with only one fenced `brb-verification` block containing this exact envelope:
+Apply each challenge's `reportEffect`: `actionable` keeps or changes a finding, `deferred` exposes material uncertainty, `drop` removes it, and `none` changes nothing. Return only one fenced `brb-verification` block, with no prose before or after it, containing this exact envelope:
 
 The validator enforces these verdict semantics:
 

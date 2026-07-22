@@ -54,29 +54,56 @@ Abort the review as stale.
 | `medium-regression.md` | The control finds the defect but chooses `Review event: REQUEST_CHANGES` and records neither isolated angles nor validation. | Report the pagination defect exactly once, reject the deliberate formatting bait, validate or narrow the finding, update one marker through completion, and submit `COMMENT`, never `REQUEST_CHANGES`. |
 | `stale-head.md` | The control correctly says `Abort the review as stale` but its `GitHub output: none` leaves no marker lifecycle or terminal stale status. | Replace the working marker with the exact old/new-SHA stale message, leave no working marker behind, and submit no native review. |
 
-## Forward-test prompt
+## Forward test: 2026-07-22
 
-State that the fixture was authored by Codex. Ask a fresh agent to use `$blast-radius-buddy` to review a fixture pull-request diff containing:
+Three blind agents received only one fixture each, the worktree skill path, and the mocked-GitHub constraint. The clean and medium fixtures ran first as slots allowed; stale ran after one finished. Every `gh` response and GitHub operation was represented by a local artifact. No live write, code edit, branch mutation, commit, or push occurred.
 
-- one concrete high-impact adjacent-feature regression with a deterministic reproducible check but no regression test;
-- plausible naming and formatting nits that do not change behavior; and
-- mocked `gh api` responses only, with no live GitHub write authorization.
+### Observed failures and minimal corrections
 
-Require a coding-agent reviewer different from Codex. The host builds the complete packet from the fixture diff, relevant requirements, repository instructions, necessary code, and test commands, but does not disclose the intended finding or fix.
+1. The first clean run used the invalid shorthand `feature-truth` and two angle calls exhausted:
 
-## Passing observations
+   > Expected exactly one final fenced brb-review JSON block
 
-- The reviewer choice differs from the stated authoring agent.
-- Security and abuse, system blast radius, and feature truth and adjacent regressions run in three fresh, isolated contexts. Each starts in a newly created fresh neutral directory outside the target repository with no checked-out PR files or configuration.
-- Reviewer customizations are disabled with the documented CLI flags. Reviewers receive only the host-built packet as untrusted prompt data; they have no tools or repository access.
-- The preferred Codex reviewer is a fresh OpenAI API or model invocation with tools omitted or disabled and no target path. A Codex CLI is used only inside an external sandbox or container that exposes the neutral packet directory, not the target repository or host filesystem, and exposes no secrets to model tools.
-- If no genuinely tool-less or externally isolated different reviewer is available, the workflow must choose another different coding agent or stop as blocked.
-- The synthesis rejects nits and any claim missing a concrete failure path, meaningful impact, file and line evidence, confidence and severity, a regression test or reproducible check, or the smallest credible fix.
-- A reproducible check can prove triage, but the accepted failure is encoded in a durable automated regression test and proven RED before production code changes, then GREEN with the targeted test and relevant suite.
-- A fresh final pass checks the repaired failure path.
-- No live GitHub command runs without explicit authorization.
-- Mocked reporting creates or updates one authenticated-user marker comment whose initial body starts with the approved sentence and whose final body follows the report contract.
+   The smallest correction lists all three canonical angle slugs and tells first-pass reviewers to return one fenced block with no prose before or after it. A contract test captured both requirements before the recipe changed.
 
-## Completed forward test
+2. The next clean run completed all three first passes, then exhausted:
 
-A fresh orchestrator reviewed a disposable invoice-access change authored by Codex. Three separate tool-less Claude contexts ran from empty neutral directories. They found the same cross-tenant disclosure through the three angles; synthesis accepted one blocker, rejected the two duplicates, and ignored formatting bait. The orchestrator added a durable cross-account test before production changes, captured RED, restored the ownership predicate, captured targeted GREEN and a 3/3 suite, then received `VERIFIED` from a fourth fresh isolated repair pass. No GitHub or remote write ran.
+   > Expected exactly one final fenced brb-reproduction JSON block
+
+   The same exact-only wording was added to reproduction and fresh-eyes recipes and protocol contracts. A contract test first failed for the missing reproduction and verification wording, then passed.
+
+3. The original clean fixture was not genuinely clean. All three fresh angles independently found the ambiguous key `${user.id}:${resource.id}`; system blast radius also reported:
+
+   > Unbounded cache growth leads to memory exhaustion in long-running processes
+
+   Suppressing those findings to force `APPROVE` would make the oracle dishonest. The fixture now uses `JSON.stringify([user.id, resource.id])`, states that IDs are arbitrary strings, and supplies the bounded TTL/LRU cache contract. The short variable `k` remains deliberate naming bait. A fixture contract test failed before this correction and passed after it.
+
+No other skill behavior changed.
+
+### Corrected-run score
+
+| assertion | clean | medium regression | stale head |
+| --- | --- | --- | --- |
+| Three fresh canonical angles | Pass: three isolated, tool-less Claude outputs validated | Pass: three isolated, tool-less Claude outputs validated | Pass: three clean angle envelopes supplied by the fixture and protocol-validated |
+| Reject bait | Pass: no finding or comment about short name `k` | Pass: no finding or comment about parentheses or spacing | Not applicable |
+| Finding handling | Pass: no actionable finding survived the stated cache and ID contracts | Pass: two angles were deduplicated to exactly one `BRB001`; direct changed-line evidence validated it, so reproduction selection was empty | Pass: no findings |
+| Fresh eyes | Pass: `clean`, no challenges | Pass: `uphold`, no challenges | Pass: `clean`, no challenges |
+| Head recheck | Pass: captured and rechecked full SHA matched | Pass: captured and rechecked full SHA matched | Pass: changed from `1111111` to `2222222` and blocked submission |
+| Native event | Pass: `APPROVE`, zero inline comments | Pass: `COMMENT`, one pagination comment | Pass: no native review body, comments, or event |
+| Marker terminal state | Pass: exact completed marker | Pass: exact completed marker | Pass: exact stale-head marker only |
+
+Both submitted mock reviews start exactly with:
+
+```text
+🧨 The shake is over; here's what held and what came loose.
+```
+
+All three runs start with the exact playful working marker. The clean and medium runs replace it with the completed marker; the stale run replaces it with:
+
+```text
+Blast Radius Buddy stopped because the PR moved from `1111111` to `2222222`. Run it again for the new revision.
+
+<!-- blast-radius-buddy -->
+```
+
+No run left a working marker behind. The stale run intentionally has no final review opening because no native review artifact was prepared or submitted.
