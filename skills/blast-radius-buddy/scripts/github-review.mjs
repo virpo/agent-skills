@@ -264,13 +264,14 @@ function hunkHeader(line) {
   return { oldCount, newCount, newLine: newStart };
 }
 
-function diffPath(line) {
+function newDiffHeader(line) {
+  if (line === '+++ /dev/null') return { recognized: true, path: null };
   const match = line.match(/^\+\+\+ b\/(.+)$/);
-  if (!match) return null;
+  if (!match) return { recognized: false, path: null };
   try {
-    return repositoryPath(match[1], 'diff path');
+    return { recognized: true, path: repositoryPath(match[1], 'diff path') };
   } catch {
-    return null;
+    return { recognized: false, path: null };
   }
 }
 
@@ -312,10 +313,10 @@ export function collectChangedLines(diff) {
   for (const line of lines) {
     if (pendingOldHeader) {
       pendingOldHeader = false;
-      const confirmedPath = diffPath(line);
-      if (confirmedPath) {
+      const newHeader = newDiffHeader(line);
+      if (newHeader.recognized) {
         flushHunk();
-        currentPath = confirmedPath;
+        currentPath = newHeader.path;
         expectsNewPath = false;
         continue;
       }
@@ -376,7 +377,8 @@ export function collectChangedLines(diff) {
       continue;
     }
     if (expectsNewPath) {
-      currentPath = diffPath(line);
+      const newHeader = newDiffHeader(line);
+      currentPath = newHeader.recognized ? newHeader.path : null;
       expectsNewPath = false;
       continue;
     }

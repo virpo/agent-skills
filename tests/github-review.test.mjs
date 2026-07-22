@@ -263,6 +263,23 @@ test('collectChangedLines accepts concatenated file patches without diff headers
   ]));
 });
 
+test('collectChangedLines preserves prior anchors before a concatenated deleted file', () => {
+  const diff = [
+    '--- a/src/kept.ts',
+    '+++ b/src/kept.ts',
+    '@@ -0,0 +3 @@',
+    '+kept file line',
+    '--- a/src/deleted.ts',
+    '+++ /dev/null',
+    '@@ -1 +0,0 @@',
+    '-deleted file line',
+  ].join('\n');
+
+  assert.deepEqual(collectChangedLines(diff), new Map([
+    ['src/kept.ts', new Set([3])],
+  ]));
+});
+
 test('partitionInlineFindings keeps exact anchors and moves unanchored findings to bodyOnly', () => {
   const anchored = clone(FINDING);
   const unanchored = {
