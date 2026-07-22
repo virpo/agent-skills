@@ -245,6 +245,24 @@ test('collectChangedLines rejects a hunk that overruns its declared line counts'
   assert.deepEqual(collectChangedLines(diff), new Map());
 });
 
+test('collectChangedLines accepts concatenated file patches without diff headers', () => {
+  const diff = [
+    '--- a/src/first.ts',
+    '+++ b/src/first.ts',
+    '@@ -0,0 +1 @@',
+    '+first file line',
+    '--- a/src/second.ts',
+    '+++ b/src/second.ts',
+    '@@ -0,0 +7 @@',
+    '+second file line',
+  ].join('\n');
+
+  assert.deepEqual(collectChangedLines(diff), new Map([
+    ['src/first.ts', new Set([1])],
+    ['src/second.ts', new Set([7])],
+  ]));
+});
+
 test('partitionInlineFindings keeps exact anchors and moves unanchored findings to bodyOnly', () => {
   const anchored = clone(FINDING);
   const unanchored = {

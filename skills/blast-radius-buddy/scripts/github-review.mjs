@@ -274,6 +274,18 @@ function diffPath(line) {
   }
 }
 
+function oldDiffHeader(line) {
+  if (line === '--- /dev/null') return true;
+  const match = line.match(/^--- a\/(.+)$/);
+  if (!match) return false;
+  try {
+    repositoryPath(match[1], 'old diff path');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function collectChangedLines(diff) {
   if (typeof diff !== 'string') throw new TypeError('diff must be a string');
   const changedLines = new Map();
@@ -283,6 +295,7 @@ export function collectChangedLines(diff) {
   let currentPath = null;
   let expectsNewPath = false;
   let hunk = null;
+  let pendingOldHeader = false;
 
   const flushHunk = () => {
     if (hunk
@@ -297,6 +310,17 @@ export function collectChangedLines(diff) {
   };
 
   for (const line of lines) {
+    if (pendingOldHeader) {
+      pendingOldHeader = false;
+      const confirmedPath = diffPath(line);
+      if (confirmedPath) {
+        flushHunk();
+        currentPath = confirmedPath;
+        expectsNewPath = false;
+        continue;
+      }
+      hunk.valid = false;
+    }
     if (line.startsWith('diff --git ')) {
       flushHunk();
       currentPath = null;
@@ -319,6 +343,13 @@ export function collectChangedLines(diff) {
       continue;
     }
     if (hunk) {
+      if (hunk.valid
+        && hunk.oldSeen === hunk.oldCount
+        && hunk.newSeen === hunk.newCount
+        && oldDiffHeader(line)) {
+        pendingOldHeader = true;
+        continue;
+      }
       const prefix = line[0];
       if (prefix === ' ') {
         if (hunk.newLine > 0) hunk.lines.push(hunk.newLine);
@@ -339,7 +370,7 @@ export function collectChangedLines(diff) {
       }
       continue;
     }
-    if (line.startsWith('--- ')) {
+    if (oldDiffHeader(line)) {
       currentPath = null;
       expectsNewPath = true;
       continue;
@@ -353,6 +384,7 @@ export function collectChangedLines(diff) {
       currentPath = null;
     }
   }
+  if (pendingOldHeader && hunk) hunk.valid = false;
   flushHunk();
   return changedLines;
 }
