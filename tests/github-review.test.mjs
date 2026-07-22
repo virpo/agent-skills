@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import test from 'node:test';
 
 import {
@@ -9,6 +9,7 @@ import {
   collectChangedLines,
   main,
   partitionInlineFindings,
+  prepareReview,
   submitReview,
 } from '../skills/blast-radius-buddy/scripts/github-review.mjs';
 import { fakeExecute } from './helpers/fake-execute.mjs';
@@ -385,6 +386,45 @@ test('partitionInlineFindings neutralizes injected Buddy markers before the fina
   assert.ok(comment.body.endsWith(FINDING_MARKER));
 });
 
+test('prepareReview deterministically writes safe body metadata and inline finding markers', () => {
+  const unanchored = {
+    ...clone(FINDING),
+    id: 'BRB002',
+    title: 'Deleted behavior still needs a body finding',
+    evidence: [{ path: 'src/deleted.ts', line: 8, behavior: 'deleted code path' }],
+  };
+  const rejectedNit = {
+    ...clone(FINDING),
+    id: 'BRB003',
+    severity: 'nit',
+    title: 'Rename this local variable',
+  };
+  const report = {
+    ...clone(REPORT),
+    findings: [FINDING, unanchored, rejectedNit],
+  };
+  const diff = [
+    'diff --git a/src/paging.ts b/src/paging.ts',
+    '--- a/src/paging.ts',
+    '+++ b/src/paging.ts',
+    '@@ -42 +42 @@',
+    '-return Math.floor(total / pageSize);',
+    '+return Math.floor((total - 1) / pageSize);',
+  ].join('\n');
+
+  const first = prepareReview(report, diff);
+  const second = prepareReview(clone(report), diff);
+
+  assert.deepEqual(second, first);
+  assert.match(first.body, /<!-- blast-radius-buddy-review:/);
+  assert.match(first.body, /Deleted behavior still needs a body finding/);
+  assert.doesNotMatch(first.body, /Rename this local variable/);
+  assert.deepEqual(first.comments.map(({ path, line }) => ({ path, line })), [
+    { path: 'src/paging.ts', line: 42 },
+  ]);
+  assert.ok(first.comments[0].body.endsWith(FINDING_MARKER));
+});
+
 test('submitReview posts only COMMENT or APPROVE with the captured SHA', async () => {
   for (const event of ['COMMENT', 'APPROVE']) {
     const execute = fakeExecute([{
@@ -556,4 +596,50 @@ test('main renders a report file and rejects missing submit files before gh', as
     /ENOENT/,
   );
   assert.equal(execute.calls.length, 0);
+});
+
+test('main prepare consumes report and unified diff and writes body plus comments without gh', async () => {
+  const reportFile = resolve('/mock/report.json');
+  const diffFile = resolve('/mock/pr.diff');
+  const bodyOutput = resolve('/mock/body.md');
+  const commentsOutput = resolve('/mock/comments.json');
+  const diff = [
+    '--- a/src/paging.ts',
+    '+++ b/src/paging.ts',
+    '@@ -42 +42 @@',
+    '-old line',
+    '+new line',
+  ].join('\n');
+  const inputs = new Map([
+    [reportFile, JSON.stringify(REPORT)],
+    [diffFile, diff],
+  ]);
+  const writes = [];
+  let executions = 0;
+
+  await main([
+    'prepare',
+    '--report-file', reportFile,
+    '--diff-file', diffFile,
+    '--body-output', bodyOutput,
+    '--comments-output', commentsOutput,
+  ], {
+    readFile: async (path) => inputs.get(path),
+    writeFile: async (...args) => writes.push(args),
+    execute: async () => {
+      executions += 1;
+      throw new Error('prepare must not execute gh');
+    },
+  });
+
+  assert.equal(executions, 0);
+  assert.equal(writes.length, 2);
+  assert.deepEqual(writes.map(([path, , encoding]) => [path, encoding]), [
+    [bodyOutput, 'utf8'],
+    [commentsOutput, 'utf8'],
+  ]);
+  assert.match(writes[0][1], /<!-- blast-radius-buddy-review:/);
+  const comments = JSON.parse(writes[1][1]);
+  assert.equal(comments.length, 1);
+  assert.ok(comments[0].body.endsWith(FINDING_MARKER));
 });

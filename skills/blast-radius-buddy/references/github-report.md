@@ -46,6 +46,30 @@ Neither case submits a native review or claims approval. Never leave the marker 
 
 ## Native review
 
+Prepare the review artifacts before submission:
+
+```bash
+node skills/blast-radius-buddy/scripts/github-review.mjs prepare \
+  --report-file REPORT.json \
+  --diff-file PR.diff \
+  --body-output BODY.md \
+  --comments-output COMMENTS.json
+```
+
+`prepare` is deterministic and does not call GitHub. It consumes the normalized report and captured unified diff, writes a marker-safe report body, anchors only approved actionable findings on valid new-side diff lines, writes stable finding markers into inline comments, and keeps unanchored findings in the body.
+
+Submit only the prepared artifacts after the event gates pass:
+
+```bash
+node skills/blast-radius-buddy/scripts/github-review.mjs submit \
+  --repo OWNER/REPO \
+  --pr NUMBER \
+  --head-sha FULL_HEAD_SHA \
+  --event COMMENT \
+  --body-file BODY.md \
+  --comments-file COMMENTS.json
+```
+
 Start the native review with exactly:
 
 ```text

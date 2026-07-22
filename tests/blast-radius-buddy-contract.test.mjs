@@ -9,8 +9,10 @@ async function read(relativePath) {
 }
 
 test('documents the native high-signal PR review contract', async () => {
-  const [skill, report, validation, readme] = await Promise.all([
+  const [skill, angles, prompts, report, validation, readme] = await Promise.all([
     read('skills/blast-radius-buddy/SKILL.md'),
+    read('skills/blast-radius-buddy/references/review-angles.md'),
+    read('skills/blast-radius-buddy/references/reviewer-prompts.md'),
     read('skills/blast-radius-buddy/references/github-report.md'),
     read('skills/blast-radius-buddy/references/validation.md'),
     read('README.md'),
@@ -27,6 +29,25 @@ test('documents the native high-signal PR review contract', async () => {
   assert.match(report, /careful shake/);
   assert.match(report, /here's what held and what came loose/);
   assert.match(validation, /confirmed.*narrowed.*downgraded.*unclear.*refuted/is);
+  assert.match(
+    angles,
+    /--angle.*assigned angle.*exactly one reporter.*matching.*assigned angle/is,
+  );
+  assert.match(angles, /synthesi[sz]ed.*multiple.*unique.*approved.*angle/is);
+  assert.match(
+    prompts,
+    /retry.*only.*timeout.*malformed.*protocol.*validation.*launch.*authentication.*permission.*model.*not retried/is,
+  );
+  assert.match(
+    validation,
+    /confirmed.*actionable.*narrowed.*actionable.*downgraded.*actionable.*drop.*unclear.*deferred.*refuted.*drop/is,
+  );
+  assert.match(validation, /clean.*only.*none.*never.*actionable/is);
+  assert.match(
+    report,
+    /github-review\.mjs prepare.*--report-file.*--diff-file.*--body-output.*--comments-output/is,
+  );
+  assert.match(report, /prepare.*deterministic.*does not.*GitHub/is);
   assert.doesNotMatch(skill, /repair loop/i);
   assert.ok(skill.trim().split(/\s+/).length < 700, 'SKILL.md must stay below 700 words');
   assert.doesNotMatch(readme, /accepted findings[^.\n]*fix/i);

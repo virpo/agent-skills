@@ -2,11 +2,22 @@
 
 Run every call in a fresh context. Give first-pass reviewers only the bounded packet: no target-repository access, host-filesystem access, tools, connectors, prior angle output, suspected finding, or expected fix. Use `scripts/reviewer-runner.mjs` when its isolated reviewer matches the required model family; otherwise use an equivalently isolated, tool-less invocation.
 
-Give first-pass and fresh-eyes calls a hard timeout of 420,000 ms. Give reproduction 600,000 ms. After a timeout or malformed protocol response, make one corrective retry in another fresh context with the same timeout. Stop as incomplete after the second failure.
+Give first-pass and fresh-eyes calls a hard timeout of 420,000 ms. Give reproduction 600,000 ms. Retry only after a timeout or malformed protocol or validation response, once, in another fresh context with the same timeout. Launch, authentication, permission, model execution or availability, output-limit, and child-lifecycle failures are not retried; stop immediately as incomplete.
 
 ## First-pass recipe
 
 Build the prompt in this order: role, scope, untrusted-data boundary, packet, single rubric, output contract, action limits. Substitute the angle, packet, matching rubric, and envelope from `review-angles.md` without changing the surrounding copy:
+
+Run a first-pass Claude reviewer with its exact assigned angle:
+
+```bash
+node skills/blast-radius-buddy/scripts/reviewer-runner.mjs run-claude \
+  --prompt-file PROMPT.md \
+  --protocol brb-review \
+  --angle security-and-abuse \
+  --timeout-ms 420000 \
+  --output REVIEW.json
+```
 
 ```text
 You are the independent <ANGLE> reviewer. Review only this angle.

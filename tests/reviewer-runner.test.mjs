@@ -16,6 +16,7 @@ import {
 import { parseProtocolBlock } from '../skills/blast-radius-buddy/scripts/review-protocol.mjs';
 
 const COMPLETE_REVIEW = '```brb-review\n{"status":"complete","findings":[]}\n```';
+const FEATURE_ANGLE = 'feature-truth-and-adjacent-regressions';
 const REVIEW_PREFIX = join(tmpdir(), 'blast-radius-buddy-review-');
 
 async function assertMissing(path) {
@@ -100,6 +101,44 @@ test('runReviewer retries once in a different neutral directory', async () => {
     assert.equal(call.signal.aborted, false);
     await assertMissing(call.cwd);
   }
+});
+
+test('runReviewer never retries launch, authentication, permission, or model failures', async () => {
+  for (const failure of [
+    Object.assign(new Error('spawn claude ENOENT'), { code: 'ENOENT' }),
+    new Error('Claude exited with code 1: authentication failed'),
+    new Error('Claude exited with code 1: permission denied'),
+    new Error('Claude exited with code 1: model unavailable'),
+  ]) {
+    let attempts = 0;
+    await assert.rejects(
+      runReviewer({
+        prompt: 'packet',
+        launch: async () => {
+          attempts += 1;
+          throw failure;
+        },
+        validate: () => assert.fail('launch failures must not reach validation'),
+      }),
+      failure,
+    );
+    assert.equal(attempts, 1);
+  }
+});
+
+test('runReviewer retries a non-string malformed response once', async () => {
+  let attempts = 0;
+  const result = await runReviewer({
+    prompt: 'packet',
+    launch: async () => {
+      attempts += 1;
+      return attempts === 1 ? null : COMPLETE_REVIEW;
+    },
+    validate: (output) => parseProtocolBlock(output, 'brb-review'),
+  });
+
+  assert.deepEqual(result, { status: 'complete', findings: [] });
+  assert.equal(attempts, 2);
 });
 
 test('runReviewer uses a 420,000 ms default timeout', async () => {
@@ -288,7 +327,7 @@ test('child error after a termination signal still waits for the close guard', a
   assert.equal(child.listenerCount('close'), 0);
 });
 
-test('stdin EPIPE waits for close before cleanup and permits retry', async () => {
+test('stdin EPIPE waits for close before cleanup and does not retry', async () => {
   const events = [];
   const child = controlledChild(events, 'child');
   const epipe = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
@@ -343,15 +382,10 @@ test('stdin EPIPE waits for close before cleanup and permits retry', async () =>
     await child.termSent;
     child.close(null, 'SIGTERM');
     assert.deepEqual(await firstOutcome, { error: epipe });
-    assert.deepEqual(
-      await resultPromise,
-      { status: 'complete', findings: [] },
-    );
-    assert.deepEqual(events, [
-      'spawn:1', 'child:SIGTERM', 'child:exit', 'child:close', 'spawn:2',
-    ]);
+    await assert.rejects(resultPromise, epipe);
+    assert.equal(attempts, 1);
+    assert.deepEqual(events, ['spawn:1', 'child:SIGTERM', 'child:exit', 'child:close']);
     await assertMissing(directories[0]);
-    await assertMissing(directories[1]);
   } finally {
     child.close(null, 'SIGTERM');
     await resultPromise.catch(() => {});
@@ -360,18 +394,12 @@ test('stdin EPIPE waits for close before cleanup and permits retry', async () =>
 
 test('stdin EPIPE remains first cause when outer timeout fires before close', async () => {
   const events = [];
-  const children = [
-    controlledChild(events, 'first'),
-    controlledChild(events, 'second'),
-  ];
+  const child = controlledChild(events, 'first');
   const epipe = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
   const directories = [];
   const signals = [];
-  const aborted = [];
-  const spawnResolvers = [];
-  const spawned = children.map((_, index) => new Promise((resolve) => {
-    spawnResolvers[index] = resolve;
-  }));
+  let resolveSpawn;
+  const spawned = new Promise((resolve) => { resolveSpawn = resolve; });
   let attempts = 0;
 
   const resultPromise = runReviewer({
@@ -379,19 +407,16 @@ test('stdin EPIPE remains first cause when outer timeout fires before close', as
     timeoutMs: 5,
     retries: 1,
     launch: (options) => {
-      const index = attempts;
       attempts += 1;
       directories.push(options.cwd);
       signals.push(options.signal);
-      aborted[index] = new Promise((resolve) => {
-        options.signal.addEventListener('abort', resolve, { once: true });
-      });
+      if (attempts > 1) return Promise.resolve(COMPLETE_REVIEW);
       return launchClaude(options, {
         termGraceMs: 100,
         killGuardMs: 100,
         spawnImpl: () => {
-          spawnResolvers[index]();
-          return children[index];
+          resolveSpawn();
+          return child;
         },
       });
     },
@@ -403,40 +428,25 @@ test('stdin EPIPE remains first cause when outer timeout fires before close', as
   );
 
   try {
-    for (let index = 0; index < children.length; index += 1) {
-      await spawned[index];
-      children[index].stdin.emit('error', epipe);
-      await children[index].termSent;
-      await aborted[index];
+    await spawned;
+    child.stdin.emit('error', epipe);
+    await child.termSent;
+    await delay(10);
 
-      assert.equal(signals[index].aborted, true);
-      assert.equal(children[index].listenerCount('close'), 1);
-      assert.deepEqual(
-        events.filter((event) => event.endsWith('SIGTERM')),
-        children.slice(0, index + 1).map((_, childIndex) => (
-          `${childIndex === 0 ? 'first' : 'second'}:SIGTERM`
-        )),
-      );
-      await access(directories[index]);
+    assert.equal(signals[0].aborted, true);
+    assert.equal(child.listenerCount('close'), 1);
+    assert.deepEqual(events, ['first:SIGTERM']);
+    await access(directories[0]);
 
-      children[index].close(null, 'SIGTERM');
-      if (index === 0) {
-        await spawned[1];
-        assert.equal(attempts, 2);
-        await assertMissing(directories[0]);
-      }
-    }
+    child.close(null, 'SIGTERM');
 
     const outcome = await resultOutcome;
     assert.equal(outcome.error, epipe);
-    assert.equal(attempts, 2);
-    assert.deepEqual(events, [
-      'first:SIGTERM', 'first:exit', 'first:close',
-      'second:SIGTERM', 'second:exit', 'second:close',
-    ]);
-    await assertMissing(directories[1]);
+    assert.equal(attempts, 1);
+    assert.deepEqual(events, ['first:SIGTERM', 'first:exit', 'first:close']);
+    await assertMissing(directories[0]);
   } finally {
-    for (const child of children) child.close(null, 'SIGTERM');
+    child.close(null, 'SIGTERM');
     await resultOutcome;
   }
 });
@@ -741,6 +751,7 @@ test('run-claude CLI retries once and writes only normalized validated JSON', as
       'run-claude',
       '--prompt-file', './packet.md',
       '--protocol', 'brb-review',
+      '--angle', FEATURE_ANGLE,
       '--timeout-ms', '25',
       '--output', './review.json',
     ],
@@ -764,4 +775,29 @@ test('run-claude CLI retries once and writes only normalized validated JSON', as
     '{"status":"complete","findings":[]}\n',
     'utf8',
   ]]);
+});
+
+test('run-claude CLI requires an assigned angle for first-pass review validation', async () => {
+  let launches = 0;
+
+  await assert.rejects(
+    main(
+      [
+        'run-claude',
+        '--prompt-file', './packet.md',
+        '--protocol', 'brb-review',
+        '--timeout-ms', '25',
+        '--output', './review.json',
+      ],
+      {
+        readFile: async () => 'bounded packet',
+        launch: async () => {
+          launches += 1;
+          return COMPLETE_REVIEW;
+        },
+      },
+    ),
+    /--angle is required/,
+  );
+  assert.equal(launches, 0);
 });

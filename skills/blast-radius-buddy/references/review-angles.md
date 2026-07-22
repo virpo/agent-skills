@@ -2,6 +2,10 @@
 
 Give each fresh first-pass reviewer only one rubric. Do not share another reviewer's output before synthesis.
 
+Bind validation to the assigned angle. Pass the canonical angle slug with `--angle` to `reviewer-runner.mjs run-claude` or `review-protocol.mjs validate`. Each first-pass finding's `angle` must equal that assigned angle, and `reporters` must contain exactly one reporter matching the assigned angle. The validator rejects mismatches and normalizes the reporter to that canonical slug.
+
+Only the host synthesis may combine agreement. A synthesized finding may retain multiple reporters only when every reporter is a unique approved angle slug. Reviewer-supplied duplicate or unknown reporters are invalid.
+
 ## Security and abuse
 
 Trace attacker-controlled input and trust boundaries through:
@@ -47,14 +51,14 @@ Use `high` or `medium` confidence. Support every finding with a concrete mechani
 
 ## Output contract
 
-End the response with only one fenced `brb-review` block. For a completed review, including one with no findings, use this exact envelope and exact fields:
+End the response with only one fenced `brb-review` block. For a completed review, including one with no findings, use this exact envelope and exact fields. Substitute the assigned canonical angle slug for both `<assigned-angle>` values:
 
 ```brb-review
 {
   "status": "complete",
   "findings": [
     {
-      "angle": "security-and-abuse | system-blast-radius | feature-truth-and-adjacent-regressions",
+      "angle": "<assigned-angle>",
       "severity": "critical | high | medium",
       "confidence": "high | medium",
       "title": "concise observable failure",
@@ -67,7 +71,7 @@ End the response with only one fenced `brb-review` block. For a completed review
       "suggestedChange": null,
       "mechanical": false,
       "priorFeedback": null,
-      "reporters": ["matching angle"],
+      "reporters": ["<assigned-angle>"],
       "needsRuntimeProof": false,
       "securitySensitive": false,
       "deletionSensitive": false,

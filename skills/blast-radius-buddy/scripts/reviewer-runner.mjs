@@ -83,6 +83,7 @@ export async function runReviewer({
     const directory = await mkdtemp(REVIEW_DIRECTORY_PREFIX);
     const controller = new AbortController();
     let preserveDirectory = false;
+    let retryableFailure = false;
     let timedOut = false;
     let timer;
     const timeoutError = new Error(`Reviewer timed out after ${timeoutMs} ms`);
@@ -100,23 +101,36 @@ export async function runReviewer({
       } catch (error) {
         if (error instanceof UnterminatedReviewerChildError) throw error;
         if (error instanceof ReviewerOutputLimitError) throw error;
-        if (timedOut && error === controller.signal.reason) throw error;
+        if (timedOut && error === controller.signal.reason) {
+          retryableFailure = true;
+          throw error;
+        }
         if (timedOut && error?.name === 'AbortError') {
+          retryableFailure = true;
           throw new Error(`Reviewer timed out after ${timeoutMs} ms`, { cause: error });
         }
         throw error;
       }
-      if (timedOut) throw timeoutError;
+      if (timedOut) {
+        retryableFailure = true;
+        throw timeoutError;
+      }
       if (typeof output !== 'string') {
+        retryableFailure = true;
         throw new TypeError('launch must resolve to a string');
       }
-      return await validate(output);
+      try {
+        return await validate(output);
+      } catch (error) {
+        retryableFailure = true;
+        throw error;
+      }
     } catch (error) {
       if (error instanceof UnterminatedReviewerChildError) {
         preserveDirectory = true;
         throw error;
       }
-      if (attempt === retries) throw error;
+      if (!retryableFailure || attempt === retries) throw error;
     } finally {
       clearTimeout(timer);
       if (!preserveDirectory) await removeReviewDirectory(directory);
@@ -272,12 +286,13 @@ export function launchClaude(
 function usage() {
   return [
     'Usage:',
-    '  reviewer-runner.mjs run-claude --prompt-file FILE --protocol brb-review|brb-reproduction|brb-verification --timeout-ms NUMBER --output FILE',
+    '  reviewer-runner.mjs run-claude --prompt-file FILE --protocol brb-review --angle ANGLE --timeout-ms NUMBER --output FILE',
+    '  reviewer-runner.mjs run-claude --prompt-file FILE --protocol brb-reproduction|brb-verification --timeout-ms NUMBER --output FILE',
   ].join('\n');
 }
 
 function readOptions(args) {
-  const allowed = new Set(['prompt-file', 'protocol', 'timeout-ms', 'output']);
+  const allowed = new Set(['prompt-file', 'protocol', 'angle', 'timeout-ms', 'output']);
   const options = {};
   for (let index = 0; index < args.length; index += 2) {
     const flag = args[index];
@@ -310,14 +325,20 @@ function timeoutOption(value) {
   return timeoutMs;
 }
 
-function protocolValidator(protocol) {
+function protocolValidator(protocol, angle) {
   const validators = {
-    'brb-review': validateReviewResult,
+    'brb-review': (value) => validateReviewResult(value, angle),
     'brb-reproduction': validateReproductionResult,
     'brb-verification': validateVerificationResult,
   };
   const validate = validators[protocol];
   if (!validate) throw new TypeError('--protocol is unsupported');
+  if (protocol === 'brb-review' && angle === undefined) {
+    throw new TypeError('--angle is required for brb-review');
+  }
+  if (protocol !== 'brb-review' && angle !== undefined) {
+    throw new TypeError('--angle is supported only for brb-review');
+  }
   return (output) => validate(parseProtocolBlock(output, protocol));
 }
 
@@ -328,16 +349,18 @@ export async function main(args, dependencies = {}) {
   const options = readOptions(rest);
   const promptFile = requireOption(options, 'prompt-file');
   const protocol = requireOption(options, 'protocol');
+  const angle = options.angle;
   const output = requireOption(options, 'output');
   const timeoutMs = timeoutOption(requireOption(options, 'timeout-ms'));
   const readFile = dependencies.readFile ?? readFileDefault;
   const writeFile = dependencies.writeFile ?? writeFileDefault;
   const launch = dependencies.launch ?? launchClaude;
+  const validate = protocolValidator(protocol, angle);
   const prompt = await readFile(promptFile, 'utf8');
   const result = await runReviewer({
     prompt,
     launch,
-    validate: protocolValidator(protocol),
+    validate,
     timeoutMs,
     retries: 1,
   });

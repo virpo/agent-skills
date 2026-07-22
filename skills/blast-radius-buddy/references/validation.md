@@ -50,6 +50,14 @@ Do not start a fourth broad review. Classify the synthesis as:
 
 Apply each challenge's `reportEffect`: `actionable` keeps or changes a finding, `deferred` exposes material uncertainty, `drop` removes it, and `none` changes nothing. End with only one fenced `brb-verification` block containing this exact envelope:
 
+The validator enforces these verdict semantics:
+
+- `uphold`: no report-changing challenge; use an empty challenge list or only `none` effects.
+- `modify`: at least one challenge has an `actionable`, `deferred`, or `drop` effect.
+- `defer`: at least one challenge has a `deferred` effect.
+- `drop`: at least one challenge has a `drop` effect.
+- `clean`: challenges are empty or use only `none`; never pair `clean` with `actionable`, `deferred`, or `drop`.
+
 ```brb-verification
 {"verdict":"uphold | modify | defer | drop | clean","challenges":[{"target":"BRB001 | approval","evidence":"specific fact","reason":"short reason","reportEffect":"actionable | deferred | drop | none"}]}
 ```

@@ -21,6 +21,13 @@ const REPRODUCTION_VERDICTS = new Set([
 const VERIFICATION_VERDICTS = new Set(['uphold', 'modify', 'defer', 'drop', 'clean']);
 const REPRODUCTION_REPORT_EFFECTS = new Set(['actionable', 'deferred', 'drop']);
 const VERIFICATION_REPORT_EFFECTS = new Set(['actionable', 'deferred', 'drop', 'none']);
+const REPRODUCTION_EFFECTS_BY_VERDICT = new Map([
+  ['confirmed', new Set(['actionable'])],
+  ['narrowed', new Set(['actionable'])],
+  ['downgraded', new Set(['actionable', 'drop'])],
+  ['unclear', new Set(['deferred'])],
+  ['refuted', new Set(['drop'])],
+]);
 const FINDING_FIELDS = [
   'angle',
   'severity',
@@ -158,17 +165,49 @@ function normalizeEvidence(value, path) {
   };
 }
 
-function normalizeFinding(value, path) {
+function assignedAngle(value) {
+  if (typeof value !== 'string' || !ANGLES.has(value)) {
+    throw new TypeError('expected angle must be an approved review angle');
+  }
+  return value;
+}
+
+function normalizeSynthesisReporters(value, path) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new TypeError(`${path} must be a non-empty array`);
+  }
+  const reporters = value.map(
+    (reporter, index) => enumValue(reporter, ANGLES, `${path}[${index}]`),
+  );
+  if (new Set(reporters).size !== reporters.length) {
+    throw new TypeError(`${path} must contain unique approved angles`);
+  }
+  return reporters;
+}
+
+function normalizeFinding(value, path, expectedAngle) {
   assertExactFields(value, FINDING_FIELDS, path);
   if (!Array.isArray(value.evidence)) {
     throw new TypeError(`${path}.evidence must be an array`);
   }
-  if (!Array.isArray(value.reporters) || value.reporters.length === 0) {
-    throw new TypeError(`${path}.reporters must be a non-empty array`);
+  if (!Array.isArray(value.reporters)) {
+    throw new TypeError(`${path}.reporters must be an array`);
   }
-  const reporters = value.reporters.map(
-    (reporter, index) => nonEmptyString(reporter, `${path}.reporters[${index}]`),
-  );
+  const angle = enumValue(value.angle, ANGLES, `${path}.angle`);
+  let reporters;
+  if (expectedAngle !== undefined) {
+    if (angle !== expectedAngle) {
+      throw new TypeError(`${path}.angle must match the assigned angle ${expectedAngle}`);
+    }
+    if (value.reporters.length !== 1 || value.reporters[0] !== expectedAngle) {
+      throw new TypeError(
+        `${path}.reporters must contain exactly one reporter matching the assigned angle`,
+      );
+    }
+    reporters = [expectedAngle];
+  } else {
+    reporters = normalizeSynthesisReporters(value.reporters, `${path}.reporters`);
+  }
   const suggestedChange = value.suggestedChange === null
     ? null
     : nonEmptyString(value.suggestedChange, `${path}.suggestedChange`);
@@ -177,7 +216,7 @@ function normalizeFinding(value, path) {
   }
 
   return {
-    angle: enumValue(value.angle, ANGLES, `${path}.angle`),
+    angle,
     severity: enumValue(value.severity, SEVERITIES, `${path}.severity`),
     confidence: enumValue(value.confidence, CONFIDENCES, `${path}.confidence`),
     title: nonEmptyString(value.title, `${path}.title`),
@@ -226,7 +265,8 @@ export function parseProtocolBlock(text, label) {
   }
 }
 
-export function validateReviewResult(value) {
+export function validateReviewResult(value, expectedAngle) {
+  const normalizedExpectedAngle = assignedAngle(expectedAngle);
   assertObject(value, 'review');
   if (value.status === 'complete') {
     assertExactFields(value, ['status', 'findings'], 'review');
@@ -236,7 +276,11 @@ export function validateReviewResult(value) {
     return {
       status: 'complete',
       findings: value.findings.map(
-        (finding, index) => normalizeFinding(finding, `findings[${index}]`),
+        (finding, index) => normalizeFinding(
+          finding,
+          `findings[${index}]`,
+          normalizedExpectedAngle,
+        ),
       ),
     };
   }
@@ -280,7 +324,9 @@ export function assignStableIds(findings) {
   if (findings.length > 999_999) {
     throw new TypeError('findings must contain at most 999999 items');
   }
-  const normalized = validateReviewResult({ status: 'complete', findings }).findings;
+  const normalized = findings.map(
+    (finding, index) => normalizeFinding(finding, `findings[${index}]`),
+  );
   return normalized
     .toSorted(compareFindings)
     .map((finding, index) => ({
@@ -307,9 +353,10 @@ export function selectReproductionCandidates(findings) {
   return findings.filter((finding, index) => {
     assertObject(finding, `findings[${index}]`);
     stableFindingId(finding.id, `findings[${index}].id`);
-    const reporters = Array.isArray(finding.reporters)
-      ? new Set(finding.reporters.filter((reporter) => typeof reporter === 'string' && reporter.length > 0))
-      : new Set();
+    const reporters = new Set(normalizeSynthesisReporters(
+      finding.reporters,
+      `findings[${index}].reporters`,
+    ));
     if (PROOF_RISK_FLAGS.some((flag) => finding[flag] === true)) return true;
     if (reporters.size === 1) return SEVERITIES.has(finding.severity);
     return reporters.size < 2 || !directEvidence(finding.evidence);
@@ -318,17 +365,22 @@ export function selectReproductionCandidates(findings) {
 
 function normalizeReproductionItem(value, path) {
   assertExactFields(value, REPRODUCTION_RESULT_FIELDS, path);
+  const verdict = enumValue(value.verdict, REPRODUCTION_VERDICTS, `${path}.verdict`);
+  const reportEffect = enumValue(
+    value.reportEffect,
+    REPRODUCTION_REPORT_EFFECTS,
+    `${path}.reportEffect`,
+  );
+  if (!REPRODUCTION_EFFECTS_BY_VERDICT.get(verdict).has(reportEffect)) {
+    throw new TypeError(`${path}.reportEffect is incompatible with verdict ${verdict}`);
+  }
   return {
     id: stableFindingId(value.id, `${path}.id`),
-    verdict: enumValue(value.verdict, REPRODUCTION_VERDICTS, `${path}.verdict`),
+    verdict,
     severity: enumValue(value.severity, SEVERITIES, `${path}.severity`),
     evidence: nonEmptyString(value.evidence, `${path}.evidence`),
     reason: nonEmptyString(value.reason, `${path}.reason`),
-    reportEffect: enumValue(
-      value.reportEffect,
-      REPRODUCTION_REPORT_EFFECTS,
-      `${path}.reportEffect`,
-    ),
+    reportEffect,
   };
 }
 
@@ -366,12 +418,23 @@ export function validateVerificationResult(value) {
   if (!Array.isArray(value.challenges)) {
     throw new TypeError('verification.challenges must be an array');
   }
-  return {
-    verdict: enumValue(value.verdict, VERIFICATION_VERDICTS, 'verification.verdict'),
-    challenges: value.challenges.map(
-      (challenge, index) => normalizeChallenge(challenge, `challenges[${index}]`),
-    ),
-  };
+  const verdict = enumValue(value.verdict, VERIFICATION_VERDICTS, 'verification.verdict');
+  const challenges = value.challenges.map(
+    (challenge, index) => normalizeChallenge(challenge, `challenges[${index}]`),
+  );
+  const effects = new Set(challenges.map(({ reportEffect }) => reportEffect));
+  const incompatible = (
+    ((verdict === 'uphold' || verdict === 'clean')
+      && [...effects].some((effect) => effect !== 'none'))
+    || (verdict === 'modify'
+      && (challenges.length === 0 || ![...effects].some((effect) => effect !== 'none')))
+    || (verdict === 'defer' && !effects.has('deferred'))
+    || (verdict === 'drop' && !effects.has('drop'))
+  );
+  if (incompatible) {
+    throw new TypeError(`verification.challenges are incompatible with verdict ${verdict}`);
+  }
+  return { verdict, challenges };
 }
 
 function validReviewGateEnvelope(value) {
@@ -426,7 +489,8 @@ export function decideReviewEvent(gates) {
 function usage() {
   return [
     'Usage:',
-    '  review-protocol.mjs validate --kind review|reproduction|verification --input FILE',
+    '  review-protocol.mjs validate --kind review --angle ANGLE --input FILE',
+    '  review-protocol.mjs validate --kind reproduction|verification --input FILE',
     '  review-protocol.mjs select-reproduction --input SYNTHESIS.json',
     '  review-protocol.mjs decide-event --input GATES.json',
   ].join('\n');
@@ -469,16 +533,17 @@ export async function main(args, dependencies = {}) {
   let result;
 
   if (command === 'validate') {
-    const options = readOptions(rest, new Set(['kind', 'input']));
+    const options = readOptions(rest, new Set(['kind', 'angle', 'input']));
     const kind = requireOption(options, 'kind');
     const input = requireOption(options, 'input');
     const validators = {
-      review: validateReviewResult,
+      review: (value) => validateReviewResult(value, requireOption(options, 'angle')),
       reproduction: validateReproductionResult,
       verification: validateVerificationResult,
     };
     const validate = validators[kind];
     if (!validate) throw new Error(usage());
+    if (kind !== 'review' && options.angle !== undefined) throw new Error(usage());
     const text = await readFile(input, 'utf8');
     result = validate(parseProtocolBlock(text, `brb-${kind}`));
     writeStdout(`${JSON.stringify(result)}\n`);

@@ -464,6 +464,16 @@ export function partitionInlineFindings(findings, changedLines) {
   return { inline, bodyOnly };
 }
 
+export function prepareReview(report, diff) {
+  const body = buildReviewBody(report);
+  const findings = report.findings.filter(
+    (finding) => plainObject(finding) && ACTIONABLE_SEVERITIES.has(finding.severity),
+  );
+  const changedLines = collectChangedLines(diff);
+  const { inline: comments } = partitionInlineFindings(findings, changedLines);
+  return { body, comments };
+}
+
 function validateComment(comment, index) {
   if (!plainObject(comment)) throw new TypeError(`comments[${index}] must be an object`);
   const path = repositoryPath(comment.path, `comments[${index}].path`);
@@ -558,6 +568,7 @@ export async function submitReview({
 function usage() {
   return [
     'Usage:',
+    '  github-review.mjs prepare --report-file REPORT.json --diff-file PR.diff --body-output BODY.md --comments-output COMMENTS.json',
     '  github-review.mjs render --report-file REPORT.json --output BODY.md',
     '  github-review.mjs submit --repo OWNER/REPO --pr NUMBER --head-sha SHA --event COMMENT|APPROVE --body-file BODY.md --comments-file COMMENTS.json',
   ].join('\n');
@@ -599,6 +610,26 @@ export async function main(args, dependencies = {}) {
   const writeFile = dependencies.writeFile ?? writeFileDefault;
   const execute = dependencies.execute ?? defaultExecute;
   const writeStdout = dependencies.writeStdout ?? ((value) => process.stdout.write(value));
+
+  if (command === 'prepare') {
+    const options = readOptions(
+      rest,
+      new Set(['report-file', 'diff-file', 'body-output', 'comments-output']),
+    );
+    const reportFile = resolve(requireOption(options, 'report-file'));
+    const diffFile = resolve(requireOption(options, 'diff-file'));
+    const bodyOutput = resolve(requireOption(options, 'body-output'));
+    const commentsOutput = resolve(requireOption(options, 'comments-output'));
+    const [reportText, diff] = await Promise.all([
+      readFile(reportFile, 'utf8'),
+      readFile(diffFile, 'utf8'),
+    ]);
+    const report = parseJsonFile(reportText, reportFile);
+    const result = prepareReview(report, diff);
+    await writeFile(bodyOutput, result.body, 'utf8');
+    await writeFile(commentsOutput, `${JSON.stringify(result.comments)}\n`, 'utf8');
+    return result;
+  }
 
   if (command === 'render') {
     const options = readOptions(rest, new Set(['report-file', 'output']));

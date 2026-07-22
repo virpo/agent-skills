@@ -20,8 +20,12 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+const FEATURE_ANGLE = 'feature-truth-and-adjacent-regressions';
+const SECURITY_ANGLE = 'security-and-abuse';
+const SYSTEM_ANGLE = 'system-blast-radius';
+
 const FINDING = {
-  angle: 'feature-truth-and-adjacent-regressions',
+  angle: FEATURE_ANGLE,
   severity: 'medium',
   confidence: 'high',
   title: 'The final full page is skipped',
@@ -38,7 +42,7 @@ const FINDING = {
   suggestedChange: null,
   mechanical: false,
   priorFeedback: null,
-  reporters: ['feature-truth'],
+  reporters: [FEATURE_ANGLE],
   needsRuntimeProof: false,
   securitySensitive: false,
   deletionSensitive: false,
@@ -87,15 +91,47 @@ test('validateReviewResult accepts complete and needs-context envelopes', () => 
     missingContext: ['The generated route table is not present.'],
   };
 
-  assert.deepEqual(validateReviewResult(complete), complete);
-  assert.deepEqual(validateReviewResult(needsContext), needsContext);
+  assert.deepEqual(validateReviewResult(complete, FEATURE_ANGLE), complete);
+  assert.deepEqual(validateReviewResult(needsContext, FEATURE_ANGLE), needsContext);
   assert.throws(
-    () => validateReviewResult({ ...complete, extra: true }),
+    () => validateReviewResult({ ...complete, extra: true }, FEATURE_ANGLE),
     /unexpected field extra/,
   );
   assert.throws(
-    () => validateReviewResult({ status: 'needs-context', missingContext: [] }),
+    () => validateReviewResult(
+      { status: 'needs-context', missingContext: [] },
+      FEATURE_ANGLE,
+    ),
     /missingContext/,
+  );
+});
+
+test('validateReviewResult binds every first-pass finding to its assigned angle and reporter', () => {
+  const complete = { status: 'complete', findings: [FINDING] };
+
+  assert.throws(() => validateReviewResult(complete), /expected angle/i);
+  assert.throws(
+    () => validateReviewResult(complete, SECURITY_ANGLE),
+    /findings\[0\]\.angle.*assigned angle/i,
+  );
+  for (const reporters of [
+    [],
+    [SYSTEM_ANGLE],
+    [FEATURE_ANGLE, SYSTEM_ANGLE],
+    [FEATURE_ANGLE, FEATURE_ANGLE],
+  ]) {
+    assert.throws(
+      () => validateReviewResult({
+        status: 'complete',
+        findings: [{ ...FINDING, reporters }],
+      }, FEATURE_ANGLE),
+      /findings\[0\]\.reporters.*exactly one.*assigned angle/i,
+    );
+  }
+
+  assert.deepEqual(
+    validateReviewResult(complete, FEATURE_ANGLE).findings[0].reporters,
+    [FEATURE_ANGLE],
   );
 });
 
@@ -104,7 +140,10 @@ test('validateReviewResult rejects every missing finding field', () => {
     const finding = clone(FINDING);
     delete finding[field];
     assert.throws(
-      () => validateReviewResult({ status: 'complete', findings: [finding] }),
+      () => validateReviewResult(
+        { status: 'complete', findings: [finding] },
+        FEATURE_ANGLE,
+      ),
       new RegExp(`findings\\[0\\]\\.${field}`),
     );
   }
@@ -123,7 +162,7 @@ test('validateReviewResult rejects unsupported angles, low-value severities, and
       () => validateReviewResult({
         status: 'complete',
         findings: [{ ...FINDING, [field]: value }],
-      }),
+      }, FEATURE_ANGLE),
       new RegExp(`findings\\[0\\]\\.${field}`),
     );
   }
@@ -142,7 +181,10 @@ test('validateReviewResult rejects invalid repository paths and non-positive lin
     const finding = clone(FINDING);
     finding.evidence[0].path = path;
     assert.throws(
-      () => validateReviewResult({ status: 'complete', findings: [finding] }),
+      () => validateReviewResult(
+        { status: 'complete', findings: [finding] },
+        FEATURE_ANGLE,
+      ),
       /findings\[0\]\.evidence\[0\]\.path/,
     );
   }
@@ -151,7 +193,10 @@ test('validateReviewResult rejects invalid repository paths and non-positive lin
     const finding = clone(FINDING);
     finding.evidence[0].line = line;
     assert.throws(
-      () => validateReviewResult({ status: 'complete', findings: [finding] }),
+      () => validateReviewResult(
+        { status: 'complete', findings: [finding] },
+        FEATURE_ANGLE,
+      ),
       /findings\[0\]\.evidence\[0\]\.line/,
     );
   }
@@ -164,7 +209,10 @@ test('validation preserves long structural paths and finding text without trunca
   finding.evidence[0].path = longPath;
   finding.title = longTitle;
 
-  const result = validateReviewResult({ status: 'complete', findings: [finding] });
+  const result = validateReviewResult(
+    { status: 'complete', findings: [finding] },
+    FEATURE_ANGLE,
+  );
 
   assert.equal(result.findings[0].evidence[0].path, longPath);
   assert.equal(result.findings[0].title, longTitle);
@@ -195,6 +243,24 @@ test('assignStableIds sorts by severity, path, line, and title without mutating 
   assert.equal('id' in input[1], false);
 });
 
+test('assignStableIds retains only unique approved multi-angle synthesis reporters', () => {
+  const reporters = [FEATURE_ANGLE, SYSTEM_ANGLE];
+  const [assigned] = assignStableIds([{ ...FINDING, reporters }]);
+
+  assert.deepEqual(assigned.reporters, reporters);
+  assert.throws(
+    () => assignStableIds([{
+      ...FINDING,
+      reporters: [FEATURE_ANGLE, FEATURE_ANGLE],
+    }]),
+    /reporters.*unique/i,
+  );
+  assert.throws(
+    () => assignStableIds([{ ...FINDING, reporters: [FEATURE_ANGLE, 'forged-angle'] }]),
+    /reporters\[1\].*unsupported/i,
+  );
+});
+
 test('selectReproductionCandidates selects single reports and skips direct two-angle agreement', () => {
   const [singleReporter] = assignStableIds([FINDING]);
 
@@ -205,7 +271,7 @@ test('selectReproductionCandidates selects single reports and skips direct two-a
   assert.deepEqual(
     selectReproductionCandidates([{
       ...singleReporter,
-      reporters: ['feature-truth', 'system'],
+      reporters: [FEATURE_ANGLE, SYSTEM_ANGLE],
     }]),
     [],
   );
@@ -213,7 +279,7 @@ test('selectReproductionCandidates selects single reports and skips direct two-a
 
 test('selectReproductionCandidates requires complete direct evidence to skip and honors proof-risk flags', () => {
   const [finding] = assignStableIds([FINDING]);
-  const agreed = { ...finding, reporters: ['feature-truth', 'system'] };
+  const agreed = { ...finding, reporters: [FEATURE_ANGLE, SYSTEM_ANGLE] };
   const withoutEvidence = { ...agreed, evidence: [] };
   const incompleteEvidence = {
     ...agreed,
@@ -232,6 +298,20 @@ test('selectReproductionCandidates requires complete direct evidence to skip and
     assert.deepEqual(
       selectReproductionCandidates([{ ...agreed, [flag]: true }]).map(({ id }) => id),
       ['BRB001'],
+    );
+  }
+});
+
+test('selectReproductionCandidates rejects forged and duplicate synthesis reporters', () => {
+  const [finding] = assignStableIds([FINDING]);
+
+  for (const reporters of [
+    ['claimed-one', 'claimed-two'],
+    [FEATURE_ANGLE, FEATURE_ANGLE],
+  ]) {
+    assert.throws(
+      () => selectReproductionCandidates([{ ...finding, reporters }]),
+      /reporters.*(?:unsupported|unique)/i,
     );
   }
 });
@@ -270,6 +350,42 @@ test('validateReproductionResult enforces the exact reproduction schema', () => 
   );
 });
 
+test('validateReproductionResult enforces verdict and report-effect mappings', () => {
+  const base = {
+    id: 'BRB001',
+    severity: 'medium',
+    evidence: 'The supplied command produced a deterministic result.',
+    reason: 'The classification follows the observed behavior.',
+  };
+  const valid = [
+    ['confirmed', 'actionable'],
+    ['narrowed', 'actionable'],
+    ['downgraded', 'actionable'],
+    ['downgraded', 'drop'],
+    ['unclear', 'deferred'],
+    ['refuted', 'drop'],
+  ];
+  for (const [verdict, reportEffect] of valid) {
+    const result = { results: [{ ...base, verdict, reportEffect }] };
+    assert.deepEqual(validateReproductionResult(result), result);
+  }
+
+  for (const [verdict, reportEffect] of [
+    ['confirmed', 'drop'],
+    ['narrowed', 'deferred'],
+    ['downgraded', 'deferred'],
+    ['unclear', 'actionable'],
+    ['refuted', 'actionable'],
+  ]) {
+    assert.throws(
+      () => validateReproductionResult({
+        results: [{ ...base, verdict, reportEffect }],
+      }),
+      /reportEffect.*incompatible.*verdict/i,
+    );
+  }
+});
+
 test('validateVerificationResult enforces verdicts and stable challenge targets', () => {
   const result = {
     verdict: 'modify',
@@ -305,6 +421,40 @@ test('validateVerificationResult enforces verdicts and stable challenge targets'
     () => validateVerificationResult({ ...result, extra: true }),
     /unexpected field extra/,
   );
+});
+
+test('validateVerificationResult enforces fresh-eyes verdict and challenge semantics', () => {
+  const challenge = {
+    target: 'BRB001',
+    evidence: 'Specific evidence changes the synthesized finding.',
+    reason: 'The original classification needs a report change.',
+    reportEffect: 'actionable',
+  };
+  const valid = [
+    { verdict: 'uphold', challenges: [] },
+    { verdict: 'uphold', challenges: [{ ...challenge, reportEffect: 'none' }] },
+    { verdict: 'modify', challenges: [challenge] },
+    { verdict: 'defer', challenges: [{ ...challenge, reportEffect: 'deferred' }] },
+    { verdict: 'drop', challenges: [{ ...challenge, reportEffect: 'drop' }] },
+    { verdict: 'clean', challenges: [] },
+    { verdict: 'clean', challenges: [{ ...challenge, target: 'approval', reportEffect: 'none' }] },
+  ];
+  for (const result of valid) {
+    assert.deepEqual(validateVerificationResult(result), result);
+  }
+
+  for (const result of [
+    { verdict: 'uphold', challenges: [challenge] },
+    { verdict: 'modify', challenges: [{ ...challenge, reportEffect: 'none' }] },
+    { verdict: 'defer', challenges: [{ ...challenge, reportEffect: 'drop' }] },
+    { verdict: 'drop', challenges: [{ ...challenge, reportEffect: 'actionable' }] },
+    { verdict: 'clean', challenges: [challenge] },
+  ]) {
+    assert.throws(
+      () => validateVerificationResult(result),
+      /challenges.*incompatible.*verdict/i,
+    );
+  }
 });
 
 test('decideReviewEvent rejects missing and extra gate fields as marker-only', () => {
@@ -406,7 +556,12 @@ test('main validates protocol blocks, selects candidates, and decides events rea
     writeStdout: (value) => outputs.push(value),
   };
 
-  await main(['validate', '--kind', 'review', '--input', 'review.txt'], dependencies);
+  await main([
+    'validate',
+    '--kind', 'review',
+    '--angle', FEATURE_ANGLE,
+    '--input', 'review.txt',
+  ], dependencies);
   await main(['select-reproduction', '--input', 'synthesis.json'], dependencies);
   await main(['decide-event', '--input', 'gates.json'], dependencies);
 
@@ -415,6 +570,23 @@ test('main validates protocol blocks, selects candidates, and decides events rea
     `${JSON.stringify(assigned)}\n`,
     'APPROVE\n',
   ]);
+});
+
+test('select-reproduction CLI rejects forged reporter provenance', async () => {
+  const [finding] = assignStableIds([FINDING]);
+  const forged = {
+    findings: [{ ...finding, reporters: ['claimed-one', 'claimed-two'] }],
+  };
+  let output = '';
+
+  await assert.rejects(
+    main(['select-reproduction', '--input', 'forged.json'], {
+      readFile: async () => JSON.stringify(forged),
+      writeStdout: (value) => { output += value; },
+    }),
+    /reporters\[0\].*unsupported/i,
+  );
+  assert.equal(output, '');
 });
 
 test('the executable exits non-zero with the marker-only error for invalid or incomplete gates', async (t) => {
