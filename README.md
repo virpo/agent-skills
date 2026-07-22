@@ -14,7 +14,7 @@ npx skills add virpo/agent-skills --skill look-hard
 
 ### 🧨 Blast Radius Buddy
 
-Cross-review agent-written code with a different coding agent. Hunt for security failures, system-wide breakage, and deep feature regressions; prove accepted findings with tests before fixing them.
+Review a GitHub pull request through security, system blast-radius, and feature-truth angles. Validate consequential findings, ignore nits, and submit a native comment or approval without changing the branch.
 
 ```bash
 npx skills add virpo/agent-skills --skill blast-radius-buddy
@@ -26,11 +26,11 @@ The skills use the open Agent Skills folder format. They are designed for Codex 
 
 Blast Radius Buddy expects:
 
-- a git checkout;
-- GitHub CLI when PR reporting is explicitly requested; and
-- a reviewer different from the author, invoked without tools or inside a genuine external isolation boundary.
+- an explicit manual invocation for a PR URL, number, or current branch;
+- `gh` installed and authenticated for the target GitHub repository; and
+- an isolated reviewer that can run fresh contexts without target-repository access or tools.
 
-GitHub comments, code edits, pushes, review submissions, thread resolution, and merges require explicit user authorization.
+Manual invocation authorizes one marker comment and one final native review. It does not authorize code edits, pushes, `REQUEST_CHANGES`, thread resolution, or merges.
 
 ## Quality bar
 

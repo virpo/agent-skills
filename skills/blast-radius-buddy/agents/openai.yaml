@@ -1,4 +1,4 @@
 interface:
   display_name: "🧨 Blast Radius Buddy"
-  short_description: "Cross-agent review for system-breaking bugs"
-  default_prompt: "Use $blast-radius-buddy to review this PR for high-impact failures with a different coding agent."
+  short_description: "High-signal GitHub PR review without the nits"
+  default_prompt: "Run $blast-radius-buddy on this PR and submit the review."

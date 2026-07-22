@@ -1,63 +1,79 @@
 # GitHub report contract
 
-GitHub comments are external writes. Use this path only after the user explicitly authorizes a PR comment.
+Use `scripts/review-comment.mjs` for the one marker and `scripts/github-review.mjs` for the one native review. Write bodies to local files before passing them to helpers.
 
-## One-comment lifecycle
+## Marker lifecycle
 
-1. Create a local start-body file containing exactly:
+Start with exactly:
 
 ```markdown
-I am going to review this. I will update this comment with findings.
+🧨 Blast Radius Buddy is giving `<short-sha>` a careful shake; I'll keep this comment updated as the review moves.
+
+- [ ] Three-angle review
+- [ ] Finding validation
+- [ ] Fresh-eyes verification
 
 <!-- blast-radius-buddy -->
 ```
 
-2. Explicitly run:
-
-```bash
-node skills/blast-radius-buddy/scripts/review-comment.mjs write --repo OWNER/REPO --pr NUMBER --body-file START.md
-```
-
-3. Replace the local file with the final report below, preserving the marker, then run the same `write` command. The helper finds only the authenticated user's marker comment and updates it; otherwise it creates one. It also recognizes the legacy `<!-- review-tube-man -->` marker so an upgraded run adopts the existing comment.
-
-Never call the helper merely because the skill was invoked. Never post separate progress comments.
-
-## Final body
+Check each item only after that stage completes. Update the authenticated user's existing marker after each stage; never create separate progress comments. After native review submission, replace the marker with exactly:
 
 ```markdown
-# 🧨 Blast Radius Buddy
-
-**Verdict:** Blocking findings | Repaired findings | No high-impact findings
-**Revision:** BASE..HEAD
-
-## Coverage
-
-- Security and abuse: result
-- System blast radius: result
-- Feature truth and adjacent regressions: result
-
-## Accepted findings
-
-### [severity / confidence] Failure title
-
-- Failure path: trigger through outcome
-- Impact: meaningful consequence
-- Evidence: `path:line` and behavior
-- Triage proof: exact regression test or reproducible check and result
-- Repair regression: durable automated test path, name, and RED result; required when repaired
-- Fix: status and smallest repair, or suggested repair when unauthorized
-
-## Verification
-
-- Targeted durable regression: `command` — GREEN result
-- Relevant suite: `command` — result
-- Fresh repair pass: result
-
-## Residual risk
-
-Concrete unresolved risk, or `None observed within the bounded review.`
+Review complete for `<short-sha>`: <review-url>
 
 <!-- blast-radius-buddy -->
 ```
 
-Omit the accepted-findings subsection only when none survive the gate. Do not add a suggestions section for rejected nits.
+## Failure and stale state
+
+Any model, authentication, permission, protocol, reproduction, verification, or submission failure immediately replaces the working marker with this exact body:
+
+```markdown
+Blast Radius Buddy could not complete the review of `<short-sha>`: <exact reason>.
+
+<!-- blast-radius-buddy -->
+```
+
+A changed head replaces it with this exact body:
+
+```markdown
+Blast Radius Buddy stopped because the PR moved from `<old-sha>` to `<new-sha>`. Run it again for the new revision.
+
+<!-- blast-radius-buddy -->
+```
+
+Neither case submits a native review or claims approval. Never leave the marker in a working state.
+
+## Native review
+
+Start the native review with exactly:
+
+```text
+🧨 The shake is over; here's what held and what came loose.
+```
+
+Then report in this order:
+
+1. verdict and full reviewed head SHA;
+2. actionable findings;
+3. prior-feedback status;
+4. validation performed and its effect;
+5. deferred uncertainties or important out-of-scope follow-ups;
+6. three-angle coverage: security and abuse, system blast radius, feature truth and adjacent regressions.
+
+Anchor an inline comment only to a valid PR-relative new-side changed line. Preserve a finding in the review body when no reliable anchor exists. Include a suggested-change block only when the replacement is local, mechanical, same-file, and safe to apply without judgment. Keep cross-file, architectural, generated-code, deleted-line, or uncertain fixes as prose suggestions.
+
+## Event gates
+
+Submit `COMMENT` when at least one actionable finding survives or a completed review has material uncertainty worth showing the author. Never submit `REQUEST_CHANGES`.
+
+Submit `APPROVE` only when every gate passes:
+
+- all three first-pass reviewers completed with valid output;
+- selected reproduction completed or no material unresolved uncertainty remains;
+- the fresh-eyes verifier returned `clean` and upheld the clean verdict;
+- no new or still-present in-scope `critical`, `high`, or meaningful `medium` finding remains;
+- no known failed required CI check contradicts the clean verdict;
+- the current PR head exactly matches the captured SHA.
+
+Approval means the bounded code review found no actionable defect. It does not claim every CI check passed or that the PR is merge-ready.

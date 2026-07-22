@@ -1,62 +1,84 @@
-# High-impact review angles and finding gate
+# Review angles and first-pass protocol
 
-Run these as exactly three isolated reviewer contexts. Give each the same bounded packet, its single rubric, and the finding contract. Do not share another angle's output. Synthesis happens only after all three return.
+Give each fresh first-pass reviewer only one rubric. Do not share another reviewer's output before synthesis.
 
-## 1. Security and abuse
+## Security and abuse
 
-Trace attacker-controlled and cross-trust-boundary paths:
+Trace attacker-controlled input and trust boundaries through:
 
-- authentication, authorization, tenancy, ownership, and confused-deputy boundaries;
-- injection, unsafe parsing or deserialization, path and command handling;
+- authentication, authorization, tenancy, ownership, and confused-deputy paths;
+- injection, unsafe parsing or deserialization, path handling, and command execution;
 - secrets, personal data, logs, caches, errors, and unintended disclosure;
-- privilege escalation, replay, abuse at scale, and dependency or supply-chain exposure.
+- privilege escalation, replay, dependency trust, supply-chain exposure, and practical abuse at scale.
 
-Require an executable attack or misuse path. A generic hardening suggestion is not a finding.
+Require a reachable attack or misuse path and a concrete consequence. Omit generic hardening advice.
 
-## 2. System blast radius
+## System blast radius
 
-Trace how the change can fail beyond its immediate call site:
+Trace failures beyond the immediate call site through:
 
 - data loss, corruption, partial writes, migrations, rollback, and compatibility;
 - concurrency, retries, duplicate delivery, ordering, and shared mutable state;
-- startup, deploy, dependency failure, resource exhaustion, and performance cliffs;
-- shared-path regressions and observability gaps that can hide a material outage.
+- startup, deployment, dependency failure, resource exhaustion, and performance cliffs;
+- shared paths and observability gaps that can hide a material outage.
 
-Require a plausible trigger and a consequential affected surface. Local inefficiency without meaningful impact is not a finding.
+Require a plausible trigger and a consequential affected surface. Omit local inefficiency without meaningful impact.
 
-## 3. Feature truth and adjacent regressions
+## Feature truth and adjacent regressions
 
-Trace the user contract and nearby behavior end to end:
+Trace the stated user contract and nearby behavior through:
 
 - domain invariants and every changed state transition;
 - edge cases, retries, idempotency, and backwards compatibility;
 - callers and sibling features sharing the changed path;
-- whether the implementation actually satisfies the stated requirement under realistic inputs.
+- realistic inputs that distinguish the requirement from the implementation.
 
-Require a demonstrated mismatch between intended and actual behavior. Product preference is not a finding.
+Require a demonstrated mismatch between intended and actual behavior. Omit product preference.
 
-## Finding contract
+## Severity and evidence gate
 
-Return `NO_FINDING` when nothing passes. Otherwise return one or more records with every field:
+Use only `critical`, `high`, or `medium`:
 
-```yaml
-angle: security-and-abuse | system-blast-radius | feature-truth-and-adjacent-regressions
-title: concise failure, not a suggestion
-severity: blocker | high
-confidence: high | medium
-failure_path: concrete trigger-to-failure or attack sequence
-impact: meaningful user, data, security, availability, or deployment consequence
-evidence:
-  path: repository-relative file
-  lines: exact changed or surrounding lines
-  behavior: what those lines cause
-proof:
-  kind: regression-test | reproducible-check
-  command: exact deterministic command
-  expected_failure: observable pre-fix result
-smallest_fix: narrow credible repair
+- `critical`: reachable catastrophic security, data-integrity, or availability failure requiring immediate intervention;
+- `high`: reachable consequential user, data, security, availability, deployment, or compatibility failure;
+- `medium`: observable incorrect behavior, a security or reliability weakness, a significant user-facing regression, or a broken contract in code changed or directly affected by the PR.
+
+Use `high` or `medium` confidence. Support every finding with a concrete mechanism, reachability, impact, and repository-relative evidence. Use a new-side line when available. Set `suggestedChange` and `mechanical` according to the inline-suggestion eligibility in `github-report.md`. Set proof-risk booleans explicitly. The host assigns stable IDs after synthesis.
+
+## Output contract
+
+End the response with only one fenced `brb-review` block. For a completed review, including one with no findings, use this exact envelope and exact fields:
+
+```brb-review
+{
+  "status": "complete",
+  "findings": [
+    {
+      "angle": "security-and-abuse | system-blast-radius | feature-truth-and-adjacent-regressions",
+      "severity": "critical | high | medium",
+      "confidence": "high | medium",
+      "title": "concise observable failure",
+      "what": "what the changed code does",
+      "why": "mechanism and concrete result",
+      "reachability": "input, caller, state, or deployment path",
+      "impact": "user, data, security, availability, or compatibility consequence",
+      "evidence": [{ "path": "repo/relative", "line": 1, "behavior": "supporting fact" }],
+      "suggestedFix": "smallest credible behavior change",
+      "suggestedChange": null,
+      "mechanical": false,
+      "priorFeedback": null,
+      "reporters": ["matching angle"],
+      "needsRuntimeProof": false,
+      "securitySensitive": false,
+      "deletionSensitive": false,
+      "scopeUncertain": false
+    }
+  ]
+}
 ```
 
-Reject a record when any field is absent, its path cannot execute, its impact is not meaningful, its evidence does not support the claim, or its proof is not reproducible. Reproduce accepted claims before repair when authorization permits. Deduplicate by failure path and root cause, preserving the strongest evidence.
+When exact missing code, contract, configuration, or test context prevents a complete review, use:
 
-A reproducible check may survive triage. It never substitutes for a durable automated regression test during an authorized repair. Before production code changes, add and run a focused regression test that fails for the accepted path. If a durable test cannot be added, leave the code unchanged and report the gap.
+```brb-review
+{"status":"needs-context","missingContext":["exact missing item"]}
+```
