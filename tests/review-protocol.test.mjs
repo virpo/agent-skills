@@ -328,7 +328,7 @@ test('validateReproductionResult enforces the exact reproduction schema', () => 
     }],
   };
 
-  assert.deepEqual(validateReproductionResult(result), result);
+  assert.deepEqual(validateReproductionResult(result, ['BRB001']), result);
   for (const [field, value] of [
     ['id', 'finding-1'],
     ['verdict', 'accepted'],
@@ -340,12 +340,15 @@ test('validateReproductionResult enforces the exact reproduction schema', () => 
     const invalid = clone(result);
     invalid.results[0][field] = value;
     assert.throws(
-      () => validateReproductionResult(invalid),
+      () => validateReproductionResult(invalid, ['BRB001']),
       new RegExp(`results\\[0\\]\\.${field}`),
     );
   }
   assert.throws(
-    () => validateReproductionResult({ results: [{ ...result.results[0], extra: true }] }),
+    () => validateReproductionResult(
+      { results: [{ ...result.results[0], extra: true }] },
+      ['BRB001'],
+    ),
     /unexpected field extra/,
   );
 });
@@ -367,7 +370,7 @@ test('validateReproductionResult enforces verdict and report-effect mappings', (
   ];
   for (const [verdict, reportEffect] of valid) {
     const result = { results: [{ ...base, verdict, reportEffect }] };
-    assert.deepEqual(validateReproductionResult(result), result);
+    assert.deepEqual(validateReproductionResult(result, ['BRB001']), result);
   }
 
   for (const [verdict, reportEffect] of [
@@ -380,8 +383,69 @@ test('validateReproductionResult enforces verdict and report-effect mappings', (
     assert.throws(
       () => validateReproductionResult({
         results: [{ ...base, verdict, reportEffect }],
-      }),
+      }, ['BRB001']),
       /reportEffect.*incompatible.*verdict/i,
+    );
+  }
+});
+
+test('validateReproductionResult requires a non-empty unique stable expected-ID set', () => {
+  const result = {
+    results: [{
+      id: 'BRB001',
+      verdict: 'confirmed',
+      severity: 'high',
+      evidence: 'The supplied command reproduced the failure.',
+      reason: 'The finding is confirmed.',
+      reportEffect: 'actionable',
+    }],
+  };
+
+  for (const expectedIds of [
+    undefined,
+    [],
+    ['BRB001', 'BRB001'],
+    ['finding-1'],
+  ]) {
+    assert.throws(
+      () => validateReproductionResult(result, expectedIds),
+      /expected.*IDs.*(?:non-empty|unique|stable)/i,
+    );
+  }
+});
+
+test('validateReproductionResult classifies every expected ID exactly once and in host order', () => {
+  const resultFor = (id) => ({
+    id,
+    verdict: 'confirmed',
+    severity: 'high',
+    evidence: `Proof for ${id}.`,
+    reason: `${id} is confirmed.`,
+    reportEffect: 'actionable',
+  });
+  const first = resultFor('BRB001');
+  const second = resultFor('BRB002');
+
+  assert.deepEqual(
+    validateReproductionResult(
+      { results: [second, first] },
+      ['BRB001', 'BRB002'],
+    ),
+    { results: [first, second] },
+  );
+
+  for (const results of [
+    [],
+    [first],
+    [first, first],
+    [first, resultFor('BRB003')],
+  ]) {
+    assert.throws(
+      () => validateReproductionResult(
+        { results },
+        ['BRB001', 'BRB002'],
+      ),
+      /results.*(?:missing|duplicate|unexpected)/i,
     );
   }
 });
@@ -587,6 +651,39 @@ test('select-reproduction CLI rejects forged reporter provenance', async () => {
     /reporters\[0\].*unsupported/i,
   );
   assert.equal(output, '');
+});
+
+test('validate reproduction CLI binds results to the expected-IDs file', async () => {
+  const resultFor = (id) => ({
+    id,
+    verdict: 'confirmed',
+    severity: 'high',
+    evidence: `Proof for ${id}.`,
+    reason: `${id} is confirmed.`,
+    reportEffect: 'actionable',
+  });
+  const expected = ['BRB001', 'BRB002'];
+  const inputs = new Map([
+    ['expected.json', JSON.stringify(expected)],
+    ['reproduction.txt', block('brb-reproduction', {
+      results: [resultFor('BRB002'), resultFor('BRB001')],
+    })],
+  ]);
+  let output = '';
+
+  await main([
+    'validate',
+    '--kind', 'reproduction',
+    '--expected-ids-file', 'expected.json',
+    '--input', 'reproduction.txt',
+  ], {
+    readFile: async (path) => inputs.get(path),
+    writeStdout: (value) => { output += value; },
+  });
+
+  assert.deepEqual(JSON.parse(output), {
+    results: expected.map(resultFor),
+  });
 });
 
 test('the executable exits non-zero with the marker-only error for invalid or incomplete gates', async (t) => {

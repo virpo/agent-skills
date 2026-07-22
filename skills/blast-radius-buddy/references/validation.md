@@ -24,6 +24,17 @@ Classify every selected ID exactly once:
 - `unclear`: remove it from actionable findings and mark it `deferred`.
 - `refuted`: remove it and `drop` it from the report.
 
+The host writes the selected IDs, in selection order, to `EXPECTED_IDS.json` as a JSON array such as `["BRB001","BRB002"]`. Bind protocol validation to that host-owned set:
+
+```bash
+node skills/blast-radius-buddy/scripts/review-protocol.mjs validate \
+  --kind reproduction \
+  --expected-ids-file EXPECTED_IDS.json \
+  --input REPRODUCTION.txt
+```
+
+`--expected-ids-file` must contain a non-empty list of unique stable IDs. The validator rejects an empty model result, duplicate classifications, any omission, and any extra ID, then emits results in host selection order. Never trust model-returned IDs to define the selected set.
+
 End reproduction with only one fenced `brb-reproduction` block containing this exact envelope:
 
 ```brb-reproduction

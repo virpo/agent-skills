@@ -156,6 +156,19 @@ function stableFindingId(value, path) {
   return value;
 }
 
+export function validateExpectedReproductionIds(value) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new TypeError('expected reproduction IDs must be a non-empty array');
+  }
+  const expectedIds = value.map(
+    (id, index) => stableFindingId(id, `expected reproduction IDs[${index}]`),
+  );
+  if (new Set(expectedIds).size !== expectedIds.length) {
+    throw new TypeError('expected reproduction IDs must be unique');
+  }
+  return expectedIds;
+}
+
 function normalizeEvidence(value, path) {
   assertExactFields(value, EVIDENCE_FIELDS, path);
   return {
@@ -384,15 +397,31 @@ function normalizeReproductionItem(value, path) {
   };
 }
 
-export function validateReproductionResult(value) {
+export function validateReproductionResult(value, expectedIds) {
+  const normalizedExpectedIds = validateExpectedReproductionIds(expectedIds);
   assertExactFields(value, ['results'], 'reproduction');
   if (!Array.isArray(value.results)) {
     throw new TypeError('reproduction.results must be an array');
   }
+  const expected = new Set(normalizedExpectedIds);
+  const byId = new Map();
+  value.results.forEach((item, index) => {
+    const normalized = normalizeReproductionItem(item, `results[${index}]`);
+    if (!expected.has(normalized.id)) {
+      throw new TypeError(`reproduction.results has unexpected ID ${normalized.id}`);
+    }
+    if (byId.has(normalized.id)) {
+      throw new TypeError(`reproduction.results has duplicate ID ${normalized.id}`);
+    }
+    byId.set(normalized.id, normalized);
+  });
+  for (const id of normalizedExpectedIds) {
+    if (!byId.has(id)) {
+      throw new TypeError(`reproduction.results is missing expected ID ${id}`);
+    }
+  }
   return {
-    results: value.results.map(
-      (item, index) => normalizeReproductionItem(item, `results[${index}]`),
-    ),
+    results: normalizedExpectedIds.map((id) => byId.get(id)),
   };
 }
 
@@ -490,7 +519,8 @@ function usage() {
   return [
     'Usage:',
     '  review-protocol.mjs validate --kind review --angle ANGLE --input FILE',
-    '  review-protocol.mjs validate --kind reproduction|verification --input FILE',
+    '  review-protocol.mjs validate --kind reproduction --expected-ids-file IDS.json --input FILE',
+    '  review-protocol.mjs validate --kind verification --input FILE',
     '  review-protocol.mjs select-reproduction --input SYNTHESIS.json',
     '  review-protocol.mjs decide-event --input GATES.json',
   ].join('\n');
@@ -533,17 +563,32 @@ export async function main(args, dependencies = {}) {
   let result;
 
   if (command === 'validate') {
-    const options = readOptions(rest, new Set(['kind', 'angle', 'input']));
+    const options = readOptions(
+      rest,
+      new Set(['kind', 'angle', 'expected-ids-file', 'input']),
+    );
     const kind = requireOption(options, 'kind');
     const input = requireOption(options, 'input');
-    const validators = {
-      review: (value) => validateReviewResult(value, requireOption(options, 'angle')),
-      reproduction: validateReproductionResult,
-      verification: validateVerificationResult,
-    };
-    const validate = validators[kind];
-    if (!validate) throw new Error(usage());
-    if (kind !== 'review' && options.angle !== undefined) throw new Error(usage());
+    let validate;
+    if (kind === 'review') {
+      if (options['expected-ids-file'] !== undefined) throw new Error(usage());
+      validate = (value) => validateReviewResult(value, requireOption(options, 'angle'));
+    } else if (kind === 'reproduction') {
+      if (options.angle !== undefined) throw new Error(usage());
+      const expectedIdsFile = requireOption(options, 'expected-ids-file');
+      const expectedIds = validateExpectedReproductionIds(parseJsonInput(
+        await readFile(expectedIdsFile, 'utf8'),
+        expectedIdsFile,
+      ));
+      validate = (value) => validateReproductionResult(value, expectedIds);
+    } else if (kind === 'verification') {
+      if (options.angle !== undefined || options['expected-ids-file'] !== undefined) {
+        throw new Error(usage());
+      }
+      validate = validateVerificationResult;
+    } else {
+      throw new Error(usage());
+    }
     const text = await readFile(input, 'utf8');
     result = validate(parseProtocolBlock(text, `brb-${kind}`));
     writeStdout(`${JSON.stringify(result)}\n`);

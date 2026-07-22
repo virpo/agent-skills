@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   parseProtocolBlock,
+  validateExpectedReproductionIds,
   validateReproductionResult,
   validateReviewResult,
   validateVerificationResult,
@@ -287,12 +288,20 @@ function usage() {
   return [
     'Usage:',
     '  reviewer-runner.mjs run-claude --prompt-file FILE --protocol brb-review --angle ANGLE --timeout-ms NUMBER --output FILE',
-    '  reviewer-runner.mjs run-claude --prompt-file FILE --protocol brb-reproduction|brb-verification --timeout-ms NUMBER --output FILE',
+    '  reviewer-runner.mjs run-claude --prompt-file FILE --protocol brb-reproduction --expected-ids-file IDS.json --timeout-ms NUMBER --output FILE',
+    '  reviewer-runner.mjs run-claude --prompt-file FILE --protocol brb-verification --timeout-ms NUMBER --output FILE',
   ].join('\n');
 }
 
 function readOptions(args) {
-  const allowed = new Set(['prompt-file', 'protocol', 'angle', 'timeout-ms', 'output']);
+  const allowed = new Set([
+    'prompt-file',
+    'protocol',
+    'angle',
+    'expected-ids-file',
+    'timeout-ms',
+    'output',
+  ]);
   const options = {};
   for (let index = 0; index < args.length; index += 2) {
     const flag = args[index];
@@ -325,10 +334,10 @@ function timeoutOption(value) {
   return timeoutMs;
 }
 
-function protocolValidator(protocol, angle) {
+function protocolValidator(protocol, angle, expectedIds) {
   const validators = {
     'brb-review': (value) => validateReviewResult(value, angle),
-    'brb-reproduction': validateReproductionResult,
+    'brb-reproduction': (value) => validateReproductionResult(value, expectedIds),
     'brb-verification': validateVerificationResult,
   };
   const validate = validators[protocol];
@@ -339,7 +348,21 @@ function protocolValidator(protocol, angle) {
   if (protocol !== 'brb-review' && angle !== undefined) {
     throw new TypeError('--angle is supported only for brb-review');
   }
+  if (protocol === 'brb-reproduction' && expectedIds === undefined) {
+    throw new TypeError('--expected-ids-file is required for brb-reproduction');
+  }
+  if (protocol !== 'brb-reproduction' && expectedIds !== undefined) {
+    throw new TypeError('--expected-ids-file is supported only for brb-reproduction');
+  }
   return (output) => validate(parseProtocolBlock(output, protocol));
+}
+
+function parseJsonInput(text, input) {
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Invalid JSON in ${input}: ${error.message}`);
+  }
 }
 
 export async function main(args, dependencies = {}) {
@@ -350,12 +373,23 @@ export async function main(args, dependencies = {}) {
   const promptFile = requireOption(options, 'prompt-file');
   const protocol = requireOption(options, 'protocol');
   const angle = options.angle;
+  const expectedIdsFile = options['expected-ids-file'];
   const output = requireOption(options, 'output');
   const timeoutMs = timeoutOption(requireOption(options, 'timeout-ms'));
   const readFile = dependencies.readFile ?? readFileDefault;
   const writeFile = dependencies.writeFile ?? writeFileDefault;
   const launch = dependencies.launch ?? launchClaude;
-  const validate = protocolValidator(protocol, angle);
+  let expectedIds;
+  if (protocol === 'brb-reproduction') {
+    const path = requireOption(options, 'expected-ids-file');
+    expectedIds = validateExpectedReproductionIds(parseJsonInput(
+      await readFile(path, 'utf8'),
+      path,
+    ));
+  } else if (expectedIdsFile !== undefined) {
+    throw new TypeError('--expected-ids-file is supported only for brb-reproduction');
+  }
+  const validate = protocolValidator(protocol, angle, expectedIds);
   const prompt = await readFile(promptFile, 'utf8');
   const result = await runReviewer({
     prompt,

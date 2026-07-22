@@ -44,6 +44,68 @@ Blast Radius Buddy stopped because the PR moved from `<old-sha>` to `<new-sha>`.
 
 Neither case submits a native review or claims approval. Never leave the marker in a working state.
 
+## Normalized REPORT.json
+
+`prepare` consumes the exact renderer-facing shape below. Every field shown is required, including empty arrays; do not add fields.
+
+```json
+{
+  "verdict": "Actionable findings",
+  "headSha": "0123456789abcdef0123456789abcdef01234567",
+  "findings": [
+    {
+      "id": "BRB001",
+      "severity": "high",
+      "confidence": "high",
+      "title": "Concise observable failure",
+      "what": "What the changed code does.",
+      "why": "Mechanism and concrete result.",
+      "impact": "User, data, security, availability, or compatibility consequence.",
+      "evidence": [
+        {
+          "path": "src/feature.ts",
+          "line": 42,
+          "behavior": "Supporting fact on this positive new-side line."
+        }
+      ],
+      "suggestedFix": "Smallest credible behavior change.",
+      "suggestedChange": null,
+      "mechanical": false
+    }
+  ],
+  "priorFeedback": [
+    {
+      "id": "BRB099",
+      "status": "fixed",
+      "summary": "Earlier feedback no longer applies.",
+      "path": "src/old-feature.ts",
+      "line": 17
+    }
+  ],
+  "validation": [
+    "Reproduction confirmed BRB001 and kept it actionable."
+  ],
+  "deferred": [
+    "Material uncertainty that remains visible to the author."
+  ],
+  "coverage": {
+    "security": "Security and abuse result.",
+    "blastRadius": "System blast-radius result.",
+    "featureTruth": "Feature-truth and adjacent-regressions result."
+  }
+}
+```
+
+Use these field rules:
+
+- `verdict` is exactly and case-sensitively one of `Approve`, `Actionable findings`, or `Review completed with uncertainty`.
+- `headSha` is the full 40-character hexadecimal commit ID captured before review.
+- `findings` contains only actionable `critical`, `high`, or `medium` findings. Use `[]` for a clean result. Each finding has a unique stable `BRB001`-style `id`; `confidence` is `high` or `medium`; the descriptive fields are non-empty strings.
+- Each `evidence` entry has a repository-relative `path`, positive integer `line`, and non-empty `behavior`. Use a reliable PR-relative new-side changed line when the finding should be inline.
+- `suggestedFix` is non-empty prose. `suggestedChange` is either `null` or the exact replacement text. `mechanical` is a boolean and is `true` only when the replacement meets the safe-suggestion rules below.
+- `priorFeedback` entries use exactly `id`, `status`, `summary`, `path`, and `line`. `validation` and `deferred` are arrays of non-empty strings. Use empty arrays when a section has no entries.
+- `coverage` always contains exactly the non-empty `security`, `blastRadius`, and `featureTruth` strings.
+
 ## Native review
 
 Prepare the review artifacts before submission:

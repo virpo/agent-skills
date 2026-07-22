@@ -425,6 +425,21 @@ test('prepareReview deterministically writes safe body metadata and inline findi
   assert.ok(first.comments[0].body.endsWith(FINDING_MARKER));
 });
 
+test('prepareReview rejects duplicate actionable finding IDs', () => {
+  const duplicate = {
+    ...clone(FINDING),
+    title: 'A different finding with a colliding stable identity',
+  };
+
+  assert.throws(
+    () => prepareReview({
+      ...clone(REPORT),
+      findings: [clone(FINDING), duplicate],
+    }, ''),
+    /duplicate finding ID BRB001/,
+  );
+});
+
 test('submitReview posts only COMMENT or APPROVE with the captured SHA', async () => {
   for (const event of ['COMMENT', 'APPROVE']) {
     const execute = fakeExecute([{

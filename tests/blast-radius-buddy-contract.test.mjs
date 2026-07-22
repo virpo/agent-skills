@@ -42,6 +42,14 @@ test('documents the native high-signal PR review contract', async () => {
     validation,
     /confirmed.*actionable.*narrowed.*actionable.*downgraded.*actionable.*drop.*unclear.*deferred.*refuted.*drop/is,
   );
+  assert.match(
+    validation,
+    /--expected-ids-file.*non-empty.*unique.*omission.*extra/is,
+  );
+  assert.match(
+    prompts,
+    /brb-reproduction.*--expected-ids-file.*600000/is,
+  );
   assert.match(validation, /clean.*only.*none.*never.*actionable/is);
   assert.match(
     report,
@@ -68,4 +76,59 @@ test('ships every deterministic PR review helper', async () => {
   await Promise.all(
     scripts.map((script) => access(new URL(`skills/blast-radius-buddy/scripts/${script}`, root))),
   );
+});
+
+test('documents the exact normalized REPORT.json consumed by prepare', async () => {
+  const report = await read('skills/blast-radius-buddy/references/github-report.md');
+  const match = report.match(
+    /## Normalized REPORT\.json[\s\S]*?```json\n([\s\S]*?)\n```/,
+  );
+
+  assert.ok(match, 'github-report.md must contain a valid normalized REPORT.json example');
+  const value = JSON.parse(match[1]);
+  assert.deepEqual(Object.keys(value), [
+    'verdict',
+    'headSha',
+    'findings',
+    'priorFeedback',
+    'validation',
+    'deferred',
+    'coverage',
+  ]);
+  assert.deepEqual(Object.keys(value.findings[0]), [
+    'id',
+    'severity',
+    'confidence',
+    'title',
+    'what',
+    'why',
+    'impact',
+    'evidence',
+    'suggestedFix',
+    'suggestedChange',
+    'mechanical',
+  ]);
+  assert.deepEqual(Object.keys(value.findings[0].evidence[0]), [
+    'path',
+    'line',
+    'behavior',
+  ]);
+  assert.deepEqual(Object.keys(value.priorFeedback[0]), [
+    'id',
+    'status',
+    'summary',
+    'path',
+    'line',
+  ]);
+  assert.deepEqual(Object.keys(value.coverage), [
+    'security',
+    'blastRadius',
+    'featureTruth',
+  ]);
+  assert.match(
+    report,
+    /verdict.*`Approve`.*`Actionable findings`.*`Review completed with uncertainty`/is,
+  );
+  assert.match(report, /headSha.*full 40-character hexadecimal/i);
+  assert.match(report, /every field.*required.*do not add/i);
 });

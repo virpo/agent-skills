@@ -39,6 +39,17 @@ Do not edit, comment, approve, request changes, resolve, push, merge, or infer a
 
 Run one batched prompt only when `validation.md` selects candidates. Provide the captured head SHA, selected IDs and claims, relevant evidence, and the exact reproduction envelope. Use this shape:
 
+Write the host-selected IDs to `EXPECTED_IDS.json`, then run the isolated reviewer with that file. The runner validates the non-empty unique stable ID set before launch and binds result validation to it:
+
+```bash
+node skills/blast-radius-buddy/scripts/reviewer-runner.mjs run-claude \
+  --prompt-file REPRODUCTION-PROMPT.md \
+  --protocol brb-reproduction \
+  --expected-ids-file EXPECTED_IDS.json \
+  --timeout-ms 600000 \
+  --output REPRODUCTION.json
+```
+
 ```text
 You are the read-only reproduction researcher. Classify only the supplied finding IDs.
 Research only inside the isolated checkout at the captured head SHA. Use existing code, tests, configuration, or safe diagnostic commands. Do not fetch unrelated context.

@@ -194,6 +194,12 @@ export function buildReviewBody(report) {
   const findings = report.findings.filter(
     (finding) => plainObject(finding) && ACTIONABLE_SEVERITIES.has(finding.severity),
   );
+  const findingIds = new Set();
+  findings.forEach((finding, index) => {
+    const id = stableFindingId(finding.id, `findings[${index}].id`);
+    if (findingIds.has(id)) throw new TypeError(`duplicate finding ID ${id}`);
+    findingIds.add(id);
+  });
   if (!Array.isArray(report.priorFeedback)) {
     throw new TypeError('report.priorFeedback must be an array');
   }

@@ -16,6 +16,7 @@ import {
 import { parseProtocolBlock } from '../skills/blast-radius-buddy/scripts/review-protocol.mjs';
 
 const COMPLETE_REVIEW = '```brb-review\n{"status":"complete","findings":[]}\n```';
+const COMPLETE_REPRODUCTION = '```brb-reproduction\n{"results":[{"id":"BRB001","verdict":"confirmed","severity":"high","evidence":"proof","reason":"confirmed","reportEffect":"actionable"}]}\n```';
 const FEATURE_ANGLE = 'feature-truth-and-adjacent-regressions';
 const REVIEW_PREFIX = join(tmpdir(), 'blast-radius-buddy-review-');
 
@@ -800,4 +801,85 @@ test('run-claude CLI requires an assigned angle for first-pass review validation
     /--angle is required/,
   );
   assert.equal(launches, 0);
+});
+
+test('run-claude reproduction binds output to a validated expected-IDs file', async () => {
+  const writes = [];
+  let launches = 0;
+
+  await main(
+    [
+      'run-claude',
+      '--prompt-file', './reproduction-prompt.md',
+      '--protocol', 'brb-reproduction',
+      '--expected-ids-file', './expected-ids.json',
+      '--timeout-ms', '25',
+      '--output', './reproduction.json',
+    ],
+    {
+      readFile: async (path) => {
+        if (path === './expected-ids.json') return '["BRB001"]';
+        if (path === './reproduction-prompt.md') return 'bounded reproduction packet';
+        throw new Error(`unexpected read: ${path}`);
+      },
+      launch: async () => {
+        launches += 1;
+        return COMPLETE_REPRODUCTION;
+      },
+      writeFile: async (...args) => writes.push(args),
+    },
+  );
+
+  assert.equal(launches, 1);
+  assert.deepEqual(writes, [[
+    './reproduction.json',
+    '{"results":[{"id":"BRB001","verdict":"confirmed","severity":"high","evidence":"proof","reason":"confirmed","reportEffect":"actionable"}]}\n',
+    'utf8',
+  ]]);
+});
+
+test('run-claude reproduction validates expected IDs before launching', async () => {
+  const cases = [
+    { args: [], contents: undefined, error: /--expected-ids-file is required/ },
+    { args: ['--expected-ids-file', './ids.json'], contents: '[]', error: /non-empty/i },
+    {
+      args: ['--expected-ids-file', './ids.json'],
+      contents: '["BRB001","BRB001"]',
+      error: /unique/i,
+    },
+    {
+      args: ['--expected-ids-file', './ids.json'],
+      contents: '["finding-1"]',
+      error: /stable/i,
+    },
+  ];
+
+  for (const { args, contents, error } of cases) {
+    let launches = 0;
+    await assert.rejects(
+      main(
+        [
+          'run-claude',
+          '--prompt-file', './prompt.md',
+          '--protocol', 'brb-reproduction',
+          ...args,
+          '--timeout-ms', '25',
+          '--output', './reproduction.json',
+        ],
+        {
+          readFile: async (path) => {
+            if (path === './ids.json') return contents;
+            return 'bounded reproduction packet';
+          },
+          launch: async () => {
+            launches += 1;
+            return COMPLETE_REPRODUCTION;
+          },
+          writeFile: async () => {},
+        },
+      ),
+      error,
+    );
+    assert.equal(launches, 0);
+  }
 });
