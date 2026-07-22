@@ -122,6 +122,11 @@ function buddyFindingId(value) {
   return /^BRB[0-9]{3,6}$/.test(normalized) ? normalized : '';
 }
 
+function buddySuggestionId(value) {
+  const normalized = normalizeString(value);
+  return /^BRS(?:00[1-9]|0[1-9]\d|[1-9]\d{2,5})$/.test(normalized) ? normalized : '';
+}
+
 function normalizedUrl(value) {
   const normalized = normalizeString(value);
   if (!normalized) return null;
@@ -203,26 +208,28 @@ function reviewScopedKey(reviewId, linkage) {
   return `review:${normalizedText(reviewId, 'unknown-review')}:${linkage}`;
 }
 
-function inlineFindingIdentity(body) {
+function inlineBuddyIdentity(body) {
   if (typeof body !== 'string') return null;
   const match = body.match(
-    /<!--\s*blast-radius-buddy-finding:(BRB[0-9]{3,6})(?::(BRBK1_[0-9a-f]{64}))?\s*-->/,
+    /<!--\s*blast-radius-buddy-(finding|suggestion):(BR[BS][0-9]{3,6})(?::(BRBK1_[0-9a-f]{64}))?\s*-->/,
   );
-  const id = buddyFindingId(match?.[1]);
+  const id = match?.[1] === 'finding'
+    ? buddyFindingId(match?.[2])
+    : buddySuggestionId(match?.[2]);
   if (!id) return null;
-  return { id, linkage: reviewLinkageFingerprint(match?.[2]) };
+  return { id, linkage: reviewLinkageFingerprint(match?.[3]) };
 }
 
-function removeInlineFindingMarker(body) {
+function removeInlineBuddyMarker(body) {
   return typeof body === 'string'
-    ? body.replace(/<!--\s*blast-radius-buddy-finding:[\s\S]*?-->/g, '')
+    ? body.replace(/<!--\s*blast-radius-buddy-(?:finding|suggestion):[\s\S]*?-->/g, '')
     : body;
 }
 
 function normalizeThread(thread, prAuthor) {
   const root = Array.isArray(thread?.comments?.nodes) ? thread.comments.nodes[0] : undefined;
   const id = normalizedText(thread?.id ?? root?.id, 'unknown-thread');
-  const identity = inlineFindingIdentity(root?.body);
+  const identity = inlineBuddyIdentity(root?.body);
   const canonicalKey = identity
     ? reviewScopedKey(
       root?.pullRequestReview?.id ?? id,
@@ -234,7 +241,7 @@ function normalizeThread(thread, prAuthor) {
     status: classifyThread(thread ?? {}, prAuthor),
     path: structuralPath(root?.path),
     line: root?.line ?? root?.originalLine ?? null,
-    summary: normalizedText(removeInlineFindingMarker(root?.body), 'Review thread'),
+    summary: normalizedText(removeInlineBuddyMarker(root?.body), 'Review thread'),
     url: normalizedUrl(root?.url),
     source: 'review-thread',
     canonicalKey,
@@ -280,31 +287,53 @@ function parseBuddyMetadata(body) {
   return records;
 }
 
-function metadataEntries(record, review, source = 'root-review', forcedStatus = null) {
-  if (!Array.isArray(record?.findings)) return [];
-  return record.findings
-    .filter((finding) => finding && typeof finding === 'object')
-    .map((finding) => {
-      const stableId = buddyFindingId(finding.id);
+function metadataLaneEntries(items, review, {
+  source,
+  forcedStatus,
+  stableIdFor,
+  fallbackSummary,
+}) {
+  if (!Array.isArray(items)) return [];
+  return items
+    .filter((item) => item && typeof item === 'object')
+    .map((item) => {
+      const stableId = stableIdFor(item.id);
       if (!stableId) return null;
-      const legacyId = buddyFindingId(finding.canonicalKey) || stableId;
-      const linkage = reviewLinkageFingerprint(finding.linkage ?? finding.key) || legacyId;
+      const legacyId = stableIdFor(item.canonicalKey) || stableId;
+      const linkage = reviewLinkageFingerprint(item.linkage ?? item.key) || legacyId;
       const canonicalKey = reviewScopedKey(
         review?.id ?? review?.url ?? review?.html_url,
         linkage,
       );
       return {
         id: stableId || canonicalKey,
-        status: forcedStatus ?? (finding.status === 'suppressed' ? 'suppressed' : 'reported'),
-        path: structuralPath(finding.path),
-        line: Number.isSafeInteger(finding.line) && finding.line > 0 ? finding.line : null,
-        summary: normalizedText(finding.title, 'Prior Buddy finding'),
+        status: forcedStatus ?? (item.status === 'suppressed' ? 'suppressed' : 'reported'),
+        path: structuralPath(item.path),
+        line: Number.isSafeInteger(item.line) && item.line > 0 ? item.line : null,
+        summary: normalizedText(item.title, fallbackSummary),
         url: normalizedUrl(review.url ?? review.html_url),
         source,
         canonicalKey,
       };
     })
     .filter(Boolean);
+}
+
+function metadataEntries(record, review, source = 'root-review', forcedStatus = null) {
+  return [
+    ...metadataLaneEntries(record?.findings, review, {
+      source,
+      forcedStatus,
+      stableIdFor: buddyFindingId,
+      fallbackSummary: 'Prior Buddy finding',
+    }),
+    ...metadataLaneEntries(record?.suggestions, review, {
+      source,
+      forcedStatus,
+      stableIdFor: buddySuggestionId,
+      fallbackSummary: 'Prior Buddy suggestion',
+    }),
+  ];
 }
 
 function removeMetadata(body) {

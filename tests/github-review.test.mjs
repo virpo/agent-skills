@@ -19,6 +19,7 @@ import { fakeExecute } from './helpers/fake-execute.mjs';
 const HEAD_SHA = 'abcdef0123456789abcdef0123456789abcdef01';
 const REVIEW_URL = 'https://github.com/acme/widget/pull/19#pullrequestreview-9';
 const REVIEW_LINKAGE_MARKER = /<!-- blast-radius-buddy-finding:BRB001:BRBK1_[0-9a-f]{64} -->$/;
+const SUGGESTION_LINKAGE_MARKER = /<!-- blast-radius-buddy-suggestion:BRS001:BRBK1_[0-9a-f]{64} -->$/;
 
 const FINDING = {
   id: 'BRB001',
@@ -38,10 +39,30 @@ const FINDING = {
   mechanical: false,
 };
 
+const REPORT_SUGGESTION = {
+  id: 'BRS001',
+  confidence: 'high',
+  title: 'Include the export type in telemetry',
+  improvement: 'Attach the available export type to the completion event.',
+  benefit: 'Duration dashboards can be segmented without changing export behavior.',
+  evidence: [{ path: 'src/export.ts', line: 24, behavior: 'The type is already in scope.' }],
+  suggestedChange: 'track("export.completed", { durationMs, type });',
+  mechanical: true,
+};
+
+const SUGGESTION_DIFF = [
+  '--- a/src/export.ts',
+  '+++ b/src/export.ts',
+  '@@ -24 +24 @@',
+  '-track("export.completed", { durationMs });',
+  '+track("export.completed", { durationMs, type });',
+].join('\n');
+
 const REPORT = {
   verdict: 'Actionable findings',
   headSha: HEAD_SHA,
   findings: [FINDING],
+  suggestions: [],
   priorFeedback: [{
     id: 'BRB099',
     status: 'fixed',
@@ -64,6 +85,7 @@ const COMMENT_GATES = {
   materialUncertainty: true,
   verifierVerdict: 'uphold',
   findings: [{ id: 'BRB001' }],
+  suggestions: [],
   failedRequiredChecks: [],
   headUnchanged: true,
 };
@@ -83,8 +105,35 @@ const APPROVE_GATES = {
   materialUncertainty: false,
   verifierVerdict: 'clean',
   findings: [],
+  suggestions: [],
   failedRequiredChecks: [],
   headUnchanged: true,
+};
+
+const COMMENT_VERIFICATION = {
+  result: { verdict: 'uphold', challenges: [] },
+  suggestions: [],
+  promotions: [],
+};
+
+const APPROVE_VERIFICATION = {
+  result: { verdict: 'clean', challenges: [] },
+  suggestions: [],
+  promotions: [],
+};
+
+const SUGGESTION_VERIFICATION = {
+  result: {
+    verdict: 'clean',
+    challenges: [{
+      target: 'BRS001',
+      evidence: 'The optional telemetry dimension is supported by the changed code.',
+      reason: 'The suggestion survives fresh-eyes verification unchanged.',
+      reportEffect: 'none',
+    }],
+  },
+  suggestions: [REPORT_SUGGESTION],
+  promotions: [],
 };
 
 function clone(value) {
@@ -97,17 +146,32 @@ function forgedArtifactHash(event, kind, contents) {
     .digest('hex');
 }
 
-function sourceSubmission(report, diff, gates) {
-  const prepared = prepareReview(clone(report), diff, clone(gates));
+function sourceSubmission(report, diff, gates, verification) {
+  const prepared = prepareReview(
+    clone(report),
+    diff,
+    clone(gates),
+    clone(verification),
+  );
   return {
     repo: 'acme/widget',
     number: 19,
     report: clone(report),
     diff,
     gates: clone(gates),
+    verification: clone(verification),
     body: prepared.body,
     comments: prepared.comments,
   };
+}
+
+function suggestionSubmission() {
+  return sourceSubmission(
+    { ...clone(APPROVE_REPORT), suggestions: [clone(REPORT_SUGGESTION)] },
+    SUGGESTION_DIFF,
+    { ...clone(APPROVE_GATES), suggestions: [{ id: 'BRS001' }] },
+    SUGGESTION_VERIFICATION,
+  );
 }
 
 function matchingHeadResponse() {
@@ -147,6 +211,46 @@ test('buildReviewBody strictly rejects malformed or contradictory normalized rep
   const invalidReports = [
     [{ ...clone(REPORT), extra: true }, /unexpected field extra/],
     [without(REPORT, 'coverage'), /report\.coverage is required/],
+    [without(REPORT, 'suggestions'), /report\.suggestions is required/],
+    [{ ...clone(REPORT), suggestions: {} }, /report\.suggestions must be an array/],
+    [{
+      ...clone(APPROVE_REPORT),
+      suggestions: [{ ...clone(REPORT_SUGGESTION), extra: true }],
+    }, /suggestions\[0\] has unexpected field extra/],
+    [{
+      ...clone(APPROVE_REPORT),
+      suggestions: [{ ...clone(REPORT_SUGGESTION), confidence: 'medium' }],
+    }, /suggestions\[0\]\.confidence/],
+    [{
+      ...clone(APPROVE_REPORT),
+      suggestions: [without(REPORT_SUGGESTION, 'benefit')],
+    }, /suggestions\[0\]\.benefit is required/],
+    [{
+      ...clone(APPROVE_REPORT),
+      suggestions: Array.from({ length: 4 }, (_, index) => ({
+        ...clone(REPORT_SUGGESTION),
+        id: `BRS00${index + 1}`,
+      })),
+    }, /suggestions.*at most 3/i],
+    [{
+      ...clone(APPROVE_REPORT),
+      suggestions: [clone(REPORT_SUGGESTION), clone(REPORT_SUGGESTION)],
+    }, /duplicate suggestion ID BRS001/],
+    [{
+      ...clone(APPROVE_REPORT),
+      suggestions: [{ ...clone(REPORT_SUGGESTION), id: 'BRB001' }],
+    }, /suggestions\[0\]\.id.*stable suggestion ID/i],
+    [{
+      ...clone(APPROVE_REPORT),
+      suggestions: [{
+        ...clone(REPORT_SUGGESTION),
+        evidence: [{ path: '../outside', line: 24, behavior: 'out of bounds' }],
+      }],
+    }, /suggestions\[0\]\.evidence\[0\]\.path/],
+    [{
+      ...clone(APPROVE_REPORT),
+      suggestions: [{ ...clone(REPORT_SUGGESTION), suggestedChange: null }],
+    }, /suggestedChange.*mechanical/i],
     [{ ...clone(REPORT), findings: [{ ...clone(FINDING), severity: 'nit' }] }, /severity/],
     [{ ...clone(REPORT), findings: [{ ...clone(FINDING), confidence: 'low' }] }, /confidence/],
     [{
@@ -161,8 +265,16 @@ test('buildReviewBody strictly rejects malformed or contradictory normalized rep
       ...clone(REPORT),
       findings: [{ ...clone(FINDING), evidence: [{ path: 'src/a.ts', line: 0, behavior: 'x' }] }],
     }, /evidence\[0\]\.line/],
-    [{ ...clone(APPROVE_REPORT), findings: [clone(FINDING)] }, /Approve.*findings/i],
-    [{ ...clone(APPROVE_REPORT), deferred: ['Unresolved behavior.'] }, /Approve.*deferred/i],
+    [{
+      ...clone(APPROVE_REPORT),
+      findings: [clone(FINDING)],
+      suggestions: [clone(REPORT_SUGGESTION)],
+    }, /Approve.*findings/i],
+    [{
+      ...clone(APPROVE_REPORT),
+      suggestions: [clone(REPORT_SUGGESTION)],
+      deferred: ['Unresolved behavior.'],
+    }, /Approve.*deferred/i],
     [{ ...clone(REPORT), findings: [] }, /Actionable findings.*finding/i],
     [{ ...clone(APPROVE_REPORT), verdict: 'Review completed with uncertainty' }, /uncertainty.*deferred/i],
   ];
@@ -170,6 +282,303 @@ test('buildReviewBody strictly rejects malformed or contradictory normalized rep
   for (const [report, error] of invalidReports) {
     assert.throws(() => buildReviewBody(report), error);
   }
+});
+
+test('Approve reports may contain verified non-blocking suggestions', () => {
+  const report = { ...clone(APPROVE_REPORT), suggestions: [clone(REPORT_SUGGESTION)] };
+  const gates = { ...clone(APPROVE_GATES), suggestions: [{ id: 'BRS001' }] };
+  const prepared = prepareReview(report, SUGGESTION_DIFF, gates, SUGGESTION_VERIFICATION);
+
+  assert.equal(prepared.event, 'APPROVE');
+  assert.match(prepared.body, /## Non-blocking suggestions/);
+  assert.match(prepared.body, /### BRS001 · Include the export type in telemetry/);
+  assert.match(prepared.body, /- Improvement: Attach the available export type/);
+  assert.match(prepared.body, /- Benefit: Duration dashboards can be segmented/);
+  assert.match(prepared.body, /- Evidence: `src\/export\.ts:24` — The type is already in scope\./);
+  assert.equal(prepared.comments.length, 1);
+  assert.match(prepared.comments[0].body, /Non-blocking suggestion/);
+  assert.match(prepared.comments[0].body, SUGGESTION_LINKAGE_MARKER);
+});
+
+test('prepareReview requires exact report and gate suggestion ID parity', () => {
+  const report = { ...clone(APPROVE_REPORT), suggestions: [clone(REPORT_SUGGESTION)] };
+
+  for (const suggestions of [[], [{ id: 'BRS002' }]]) {
+    assert.throws(
+      () => prepareReview(
+        report,
+        SUGGESTION_DIFF,
+        { ...clone(APPROVE_GATES), suggestions },
+        SUGGESTION_VERIFICATION,
+      ),
+      /report suggestions must match gate suggestions/i,
+    );
+  }
+});
+
+test('prepareReview binds fresh-eyes classifications and exact suggestion content', () => {
+  const report = { ...clone(APPROVE_REPORT), suggestions: [clone(REPORT_SUGGESTION)] };
+  const gates = { ...clone(APPROVE_GATES), suggestions: [{ id: 'BRS001' }] };
+  const challenge = (reportEffect) => ({
+    target: 'BRS001',
+    evidence: 'Fresh eyes classified the exact normalized suggestion snapshot.',
+    reason: `The suggestion has report effect ${reportEffect}.`,
+    reportEffect,
+  });
+  const artifact = (
+    verdict,
+    challenges,
+    suggestions = [REPORT_SUGGESTION],
+    promotions = [],
+  ) => ({
+    result: { verdict, challenges },
+    suggestions: clone(suggestions),
+    promotions: clone(promotions),
+  });
+
+  assert.throws(
+    () => prepareReview(report, SUGGESTION_DIFF, gates),
+    /verification.*required/i,
+  );
+  assert.throws(
+    () => prepareReview(
+      report,
+      SUGGESTION_DIFF,
+      gates,
+      artifact('clean', [challenge('drop')]),
+    ),
+    /suggestions.*verification|drop/i,
+  );
+  assert.throws(
+    () => prepareReview(
+      {
+        ...clone(APPROVE_REPORT),
+        suggestions: [{ ...clone(REPORT_SUGGESTION), benefit: 'Changed after verification.' }],
+      },
+      SUGGESTION_DIFF,
+      gates,
+      artifact('clean', [challenge('none')]),
+    ),
+    /suggestions.*verification|content/i,
+  );
+  assert.throws(
+    () => prepareReview(
+      report,
+      SUGGESTION_DIFF,
+      gates,
+      artifact('clean', []),
+    ),
+    /missing expected ID BRS001/i,
+  );
+  assert.throws(
+    () => prepareReview(
+      report,
+      SUGGESTION_DIFF,
+      gates,
+      artifact('clean', [challenge('none')], [REPORT_SUGGESTION, REPORT_SUGGESTION]),
+    ),
+    /duplicate suggestion ID BRS001/i,
+  );
+  assert.throws(
+    () => prepareReview(
+      {
+        ...clone(APPROVE_REPORT),
+        suggestions: [{ ...clone(REPORT_SUGGESTION), id: 'BRS002' }],
+      },
+      SUGGESTION_DIFF,
+      { ...clone(APPROVE_GATES), suggestions: [{ id: 'BRS002' }] },
+      artifact('clean', [challenge('none')]),
+    ),
+    /suggestions.*verification|unexpected/i,
+  );
+
+  assert.throws(
+    () => prepareReview(
+      clone(APPROVE_REPORT),
+      '',
+      clone(APPROVE_GATES),
+      COMMENT_VERIFICATION,
+    ),
+    /verifier verdict.*verification|verification.*verdict/i,
+  );
+});
+
+test('prepareReview accepts a clean keep bound to the exact suggestion snapshot', () => {
+  const prepared = prepareReview(
+    { ...clone(APPROVE_REPORT), suggestions: [clone(REPORT_SUGGESTION)] },
+    SUGGESTION_DIFF,
+    { ...clone(APPROVE_GATES), suggestions: [{ id: 'BRS001' }] },
+    clone(SUGGESTION_VERIFICATION),
+  );
+
+  assert.equal(prepared.event, 'APPROVE');
+  assert.equal(prepared.comments.length, 1);
+  assert.match(prepared.comments[0].body, SUGGESTION_LINKAGE_MARKER);
+});
+
+function actionableSuggestionChallenge(target) {
+  return {
+    target,
+    evidence: `${target} describes a defect rather than an optional improvement.`,
+    reason: `${target} must be promoted to an actionable finding.`,
+    reportEffect: 'actionable',
+  };
+}
+
+function promotedVerification({
+  suggestions = [REPORT_SUGGESTION],
+  promotions = [{ suggestionId: 'BRS001', finding: FINDING }],
+} = {}) {
+  return {
+    result: {
+      verdict: 'modify',
+      challenges: suggestions.map(({ id }) => actionableSuggestionChallenge(id)),
+    },
+    suggestions: clone(suggestions),
+    promotions: clone(promotions),
+  };
+}
+
+function promotedReport(finding = FINDING) {
+  return {
+    ...clone(REPORT),
+    findings: [clone(finding)],
+    suggestions: [],
+    deferred: [],
+  };
+}
+
+function promotedGates(findingId = 'BRB001') {
+  return {
+    ...clone(COMMENT_GATES),
+    materialUncertainty: false,
+    verifierVerdict: 'modify',
+    findings: [{ id: findingId }],
+  };
+}
+
+test('prepareReview accepts one exact promotion for one actionable suggestion', () => {
+  const prepared = prepareReview(
+    promotedReport(),
+    '',
+    promotedGates(),
+    promotedVerification(),
+  );
+
+  assert.equal(prepared.event, 'COMMENT');
+  assert.match(prepared.body, /BRB001/);
+});
+
+test('prepareReview rejects an unrelated report finding for an actionable promotion', () => {
+  const unrelated = {
+    ...clone(FINDING),
+    id: 'BRB002',
+    title: 'An unrelated actionable failure',
+    what: 'A separate path returns an incorrect result.',
+  };
+
+  assert.throws(
+    () => prepareReview(
+      promotedReport(unrelated),
+      '',
+      promotedGates('BRB002'),
+      promotedVerification(),
+    ),
+    /promoted finding BRB001.*match.*report/i,
+  );
+});
+
+test('prepareReview requires one promotion for every actionable suggestion', () => {
+  assert.throws(
+    () => prepareReview(
+      promotedReport(),
+      '',
+      promotedGates(),
+      promotedVerification({ promotions: [] }),
+    ),
+    /promotions.*missing.*BRS001/i,
+  );
+});
+
+test('prepareReview rejects extra and duplicate suggestion promotions', () => {
+  for (const [promotions, error] of [
+    [[{ suggestionId: 'BRS001', finding: FINDING }], /promotions.*unexpected.*BRS001/i],
+    [[
+      { suggestionId: 'BRS001', finding: FINDING },
+      { suggestionId: 'BRS001', finding: { ...clone(FINDING), id: 'BRB002' } },
+    ], /promotions.*duplicate suggestion ID BRS001/i],
+  ]) {
+    assert.throws(
+      () => prepareReview(
+        { ...clone(APPROVE_REPORT), suggestions: [clone(REPORT_SUGGESTION)] },
+        SUGGESTION_DIFF,
+        { ...clone(APPROVE_GATES), suggestions: [{ id: 'BRS001' }] },
+        {
+          ...clone(SUGGESTION_VERIFICATION),
+          promotions,
+        },
+      ),
+      error,
+    );
+  }
+});
+
+test('prepareReview rejects two actionable suggestions mapped to one finding', () => {
+  const secondSuggestion = {
+    ...clone(REPORT_SUGGESTION),
+    id: 'BRS002',
+    title: 'Include a second telemetry dimension',
+  };
+
+  assert.throws(
+    () => prepareReview(
+      promotedReport(),
+      '',
+      promotedGates(),
+      promotedVerification({
+        suggestions: [REPORT_SUGGESTION, secondSuggestion],
+        promotions: [
+          { suggestionId: 'BRS001', finding: FINDING },
+          { suggestionId: 'BRS002', finding: FINDING },
+        ],
+      }),
+    ),
+    /promotions.*duplicate finding ID BRB001/i,
+  );
+});
+
+test('prepareReview rejects promoted finding content changed after verification', () => {
+  assert.throws(
+    () => prepareReview(
+      promotedReport({ ...clone(FINDING), impact: 'Changed after verification.' }),
+      '',
+      promotedGates(),
+      promotedVerification(),
+    ),
+    /promoted finding BRB001.*match.*report/i,
+  );
+});
+
+test('prepareReview rejects a surviving suggestion without a changed-line anchor', () => {
+  const report = { ...clone(APPROVE_REPORT), suggestions: [clone(REPORT_SUGGESTION)] };
+  const gates = { ...clone(APPROVE_GATES), suggestions: [{ id: 'BRS001' }] };
+  const diffWithoutSuggestionLine = [
+    '--- a/src/export.ts',
+    '+++ b/src/export.ts',
+    '@@ -25 +25 @@',
+    '-old line',
+    '+new line',
+  ].join('\n');
+
+  assert.throws(
+    () => prepareReview(
+      report,
+      diffWithoutSuggestionLine,
+      gates,
+      SUGGESTION_VERIFICATION,
+    ),
+    /suggestions\[0\].*PR-relative new-side changed line/i,
+  );
 });
 
 test('prepareReview derives the event and head from explicit host gates', () => {
@@ -181,7 +590,12 @@ test('prepareReview derives the event and head from explicit host gates', () => 
     '+new line',
   ].join('\n');
 
-  const prepared = prepareReview(clone(REPORT), diff, clone(COMMENT_GATES));
+  const prepared = prepareReview(
+    clone(REPORT),
+    diff,
+    clone(COMMENT_GATES),
+    clone(COMMENT_VERIFICATION),
+  );
 
   assert.deepEqual(Object.keys(prepared).sort(), [
     'body', 'comments', 'event', 'headSha',
@@ -197,7 +611,7 @@ test('prepareReview refuses approval reports when any approval gate fails', () =
     { ...clone(APPROVE_GATES), headUnchanged: false },
   ]) {
     assert.throws(
-      () => prepareReview(clone(APPROVE_REPORT), '', gates),
+      () => prepareReview(clone(APPROVE_REPORT), '', gates, clone(APPROVE_VERIFICATION)),
       /(?:Approve|marker only|gate|COMMENT)/i,
     );
   }
@@ -239,6 +653,7 @@ test('buildReviewBody omits empty optional sections and keeps compact metadata s
       path,
       line: 7,
     }],
+    suggestions: [],
   });
   assert.equal(metadataMatch[1].includes('suggestedFix'), false);
   assert.equal(metadataMatch[1].includes('behavior'), false);
@@ -528,8 +943,13 @@ test('prepareReview deterministically writes safe body metadata and inline findi
     '+return Math.floor((total - 1) / pageSize);',
   ].join('\n');
 
-  const first = prepareReview(report, diff, gates);
-  const second = prepareReview(clone(report), diff, clone(gates));
+  const first = prepareReview(report, diff, gates, COMMENT_VERIFICATION);
+  const second = prepareReview(
+    clone(report),
+    diff,
+    clone(gates),
+    clone(COMMENT_VERIFICATION),
+  );
 
   assert.deepEqual(second, first);
   assert.match(first.body, /<!-- blast-radius-buddy-review:/);
@@ -549,7 +969,12 @@ test('prepareReview links root metadata and inline comments with a review-linkag
     '+new line',
   ].join('\n');
 
-  const prepared = prepareReview(clone(REPORT), diff, clone(COMMENT_GATES));
+  const prepared = prepareReview(
+    clone(REPORT),
+    diff,
+    clone(COMMENT_GATES),
+    clone(COMMENT_VERIFICATION),
+  );
   const metadataMatch = prepared.body.match(/<!-- blast-radius-buddy-review:([\s\S]+) -->$/);
   assert.ok(metadataMatch);
   const metadata = JSON.parse(metadataMatch[1]);
@@ -595,7 +1020,7 @@ test('prepareReview rejects duplicate actionable finding IDs', () => {
     () => prepareReview({
       ...clone(REPORT),
       findings: [clone(FINDING), duplicate],
-    }, '', clone(COMMENT_GATES)),
+    }, '', clone(COMMENT_GATES), clone(COMMENT_VERIFICATION)),
     /duplicate finding ID BRB001/,
   );
 });
@@ -641,7 +1066,12 @@ test('submitReview re-prepares source artifacts then checks the exact head immed
     '-old line',
     '+new line',
   ].join('\n');
-  const prepared = prepareReview(clone(REPORT), diff, clone(COMMENT_GATES));
+  const prepared = prepareReview(
+    clone(REPORT),
+    diff,
+    clone(COMMENT_GATES),
+    clone(COMMENT_VERIFICATION),
+  );
   const operations = [];
   let payload;
   const execute = async (command, args) => {
@@ -661,6 +1091,7 @@ test('submitReview re-prepares source artifacts then checks the exact head immed
     report: clone(REPORT),
     diff,
     gates: clone(COMMENT_GATES),
+    verification: clone(COMMENT_VERIFICATION),
     body: prepared.body,
     comments: prepared.comments,
     execute,
@@ -674,20 +1105,14 @@ test('submitReview re-prepares source artifacts then checks the exact head immed
 
 test('submitReview rejects a stale head after one read and performs no POST', async () => {
   const staleHeadSha = '1234567890abcdef1234567890abcdef12345678';
-  const prepared = prepareReview(clone(APPROVE_REPORT), '', clone(APPROVE_GATES));
+  const submission = suggestionSubmission();
   const execute = fakeExecute([{
     stdout: JSON.stringify({ headRefOid: staleHeadSha }),
   }]);
 
   await assert.rejects(
     submitReview({
-      repo: 'acme/widget',
-      number: 19,
-      report: clone(APPROVE_REPORT),
-      diff: '',
-      gates: clone(APPROVE_GATES),
-      body: prepared.body,
-      comments: prepared.comments,
+      ...submission,
       execute,
     }),
     /head changed.*abcdef.*123456/i,
@@ -698,8 +1123,8 @@ test('submitReview rejects a stale head after one read and performs no POST', as
 test('submitReview posts only COMMENT or APPROVE with the captured SHA', async () => {
   for (const event of ['COMMENT', 'APPROVE']) {
     const submission = event === 'APPROVE'
-      ? sourceSubmission(APPROVE_REPORT, '', APPROVE_GATES)
-      : sourceSubmission(REPORT, '', COMMENT_GATES);
+      ? sourceSubmission(APPROVE_REPORT, '', APPROVE_GATES, APPROVE_VERIFICATION)
+      : sourceSubmission(REPORT, '', COMMENT_GATES, COMMENT_VERIFICATION);
     const execute = fakeExecute([
       matchingHeadResponse(),
       { stdout: JSON.stringify({ id: 9, html_url: REVIEW_URL }) },
@@ -723,10 +1148,10 @@ test('submitReview posts only COMMENT or APPROVE with the captured SHA', async (
 });
 
 test('submitReview rejects body or comment artifacts that differ from source preparation', async () => {
-  const submission = sourceSubmission(REPORT, '', COMMENT_GATES);
+  const submission = suggestionSubmission();
   for (const mismatch of [
     { body: `${submission.body}\nchanged`, comments: submission.comments },
-    { body: submission.body, comments: [{ path: 'src/paging.ts', line: 42, body: 'changed' }] },
+    { body: submission.body, comments: [{ ...submission.comments[0], body: 'changed' }] },
   ]) {
     const noExecute = fakeExecute([]);
     await assert.rejects(
@@ -742,6 +1167,44 @@ test('submitReview rejects body or comment artifacts that differ from source pre
   }
 });
 
+test('submitReview rebinds the verification artifact before any GitHub call', async () => {
+  const submission = suggestionSubmission();
+  const execute = fakeExecute([]);
+
+  await assert.rejects(
+    submitReview({
+      ...submission,
+      verification: {
+        ...clone(submission.verification),
+        suggestions: [{
+          ...clone(REPORT_SUGGESTION),
+          improvement: 'Changed after the prepared artifacts were written.',
+        }],
+      },
+      execute,
+    }),
+    /suggestions.*verification|content/i,
+  );
+  assert.equal(execute.calls.length, 0);
+});
+
+test('submitReview posts APPROVE with verified BRS inline comments', async () => {
+  const submission = suggestionSubmission();
+  let payload;
+  const execute = async (_command, args) => {
+    if (args[0] === 'pr') return matchingHeadResponse();
+    payload = JSON.parse(await readFile(args.at(-1), 'utf8'));
+    return { stdout: JSON.stringify({ id: 9, html_url: REVIEW_URL }) };
+  };
+
+  await submitReview({ ...submission, execute });
+
+  assert.equal(payload.event, 'APPROVE');
+  assert.equal(payload.comments.length, 1);
+  assert.equal(payload.comments[0].side, 'RIGHT');
+  assert.match(payload.comments[0].body, SUGGESTION_LINKAGE_MARKER);
+});
+
 test('submitReview writes the exact payload and removes its temporary file', async () => {
   const diff = [
     '--- a/src/paging.ts',
@@ -750,7 +1213,7 @@ test('submitReview writes the exact payload and removes its temporary file', asy
     '-old line',
     '+new line',
   ].join('\n');
-  const submission = sourceSubmission(REPORT, diff, COMMENT_GATES);
+  const submission = sourceSubmission(REPORT, diff, COMMENT_GATES, COMMENT_VERIFICATION);
   let payload;
   let payloadFile;
   const execute = async (command, args) => {
@@ -793,7 +1256,7 @@ test('submitReview never fabricates a right-side line for body-only findings', a
     '-old line',
     '+new line',
   ].join('\n');
-  const submission = sourceSubmission(report, diff, gates);
+  const submission = sourceSubmission(report, diff, gates, COMMENT_VERIFICATION);
   let payload;
   const execute = async (_command, args) => {
     if (args[0] === 'pr') return matchingHeadResponse();
@@ -816,7 +1279,7 @@ test('submitReview rejects an incomplete report head before GitHub', async () =>
   const execute = fakeExecute([]);
   await assert.rejects(
     submitReview({
-      ...sourceSubmission(APPROVE_REPORT, '', APPROVE_GATES),
+      ...sourceSubmission(APPROVE_REPORT, '', APPROVE_GATES, APPROVE_VERIFICATION),
       report: { ...clone(APPROVE_REPORT), headSha: HEAD_SHA.slice(0, 12) },
       execute,
     }),
@@ -826,7 +1289,12 @@ test('submitReview rejects an incomplete report head before GitHub', async () =>
 });
 
 test('submitReview cleans its temporary payload after gh fails', async () => {
-  const submission = sourceSubmission(APPROVE_REPORT, '', APPROVE_GATES);
+  const submission = sourceSubmission(
+    APPROVE_REPORT,
+    '',
+    APPROVE_GATES,
+    APPROVE_VERIFICATION,
+  );
   let payloadFile;
   const execute = async (_command, args) => {
     if (args[0] === 'pr') return matchingHeadResponse();
@@ -850,11 +1318,13 @@ test('main renders a report file and rejects missing submit files before gh', as
   const reportFile = join(directory, 'report.json');
   const diffFile = join(directory, 'pr.diff');
   const gatesFile = join(directory, 'gates.json');
+  const verificationFile = join(directory, 'verification.json');
   const outputFile = join(directory, 'body.md');
   const commentsFile = join(directory, 'comments.json');
   await writeFile(reportFile, JSON.stringify(REPORT), 'utf8');
   await writeFile(diffFile, '', 'utf8');
   await writeFile(gatesFile, JSON.stringify(COMMENT_GATES), 'utf8');
+  await writeFile(verificationFile, JSON.stringify(COMMENT_VERIFICATION), 'utf8');
   await writeFile(commentsFile, '[]', 'utf8');
 
   await main(['render', '--report-file', reportFile, '--output', outputFile]);
@@ -872,6 +1342,7 @@ test('main renders a report file and rejects missing submit files before gh', as
       '--report-file', reportFile,
       '--diff-file', diffFile,
       '--gates-file', gatesFile,
+      '--verification-file', verificationFile,
       '--body-file', join(directory, 'missing-body.md'),
       '--comments-file', commentsFile,
     ], { execute }),
@@ -880,10 +1351,11 @@ test('main renders a report file and rejects missing submit files before gh', as
   assert.equal(execute.calls.length, 0);
 });
 
-test('main prepare consumes report and unified diff and writes body plus comments without gh', async () => {
+test('main prepare consumes all source artifacts and writes body plus comments without gh', async () => {
   const reportFile = resolve('/mock/report.json');
   const diffFile = resolve('/mock/pr.diff');
   const gatesFile = resolve('/mock/gates.json');
+  const verificationFile = resolve('/mock/verification.json');
   const bodyOutput = resolve('/mock/body.md');
   const commentsOutput = resolve('/mock/comments.json');
   const diff = [
@@ -897,6 +1369,7 @@ test('main prepare consumes report and unified diff and writes body plus comment
     [reportFile, JSON.stringify(REPORT)],
     [diffFile, diff],
     [gatesFile, JSON.stringify(COMMENT_GATES)],
+    [verificationFile, JSON.stringify(COMMENT_VERIFICATION)],
   ]);
   const writes = [];
   let executions = 0;
@@ -906,6 +1379,7 @@ test('main prepare consumes report and unified diff and writes body plus comment
     '--report-file', reportFile,
     '--diff-file', diffFile,
     '--gates-file', gatesFile,
+    '--verification-file', verificationFile,
     '--body-output', bodyOutput,
     '--comments-output', commentsOutput,
   ], {
@@ -933,13 +1407,20 @@ test('main submit consumes source artifacts and checks the head before its only 
   const reportFile = resolve('/mock/report.json');
   const diffFile = resolve('/mock/pr.diff');
   const gatesFile = resolve('/mock/gates.json');
+  const verificationFile = resolve('/mock/verification.json');
   const bodyFile = resolve('/mock/body.md');
   const commentsFile = resolve('/mock/comments.json');
-  const submission = sourceSubmission(APPROVE_REPORT, '', APPROVE_GATES);
+  const submission = sourceSubmission(
+    APPROVE_REPORT,
+    '',
+    APPROVE_GATES,
+    APPROVE_VERIFICATION,
+  );
   const inputs = new Map([
     [reportFile, JSON.stringify(APPROVE_REPORT)],
     [diffFile, ''],
     [gatesFile, JSON.stringify(APPROVE_GATES)],
+    [verificationFile, JSON.stringify(APPROVE_VERIFICATION)],
     [bodyFile, submission.body],
     [commentsFile, JSON.stringify(submission.comments)],
   ]);
@@ -961,6 +1442,7 @@ test('main submit consumes source artifacts and checks the head before its only 
     '--report-file', reportFile,
     '--diff-file', diffFile,
     '--gates-file', gatesFile,
+    '--verification-file', verificationFile,
     '--body-file', bodyFile,
     '--comments-file', commentsFile,
   ], {

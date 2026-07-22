@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import test from 'node:test';
 
 import {
+  assignSuggestionIds,
   assignStableIds,
   decideReviewEvent,
   main,
@@ -49,12 +50,26 @@ const FINDING = {
   scopeUncertain: false,
 };
 
+const SUGGESTION = {
+  angle: FEATURE_ANGLE,
+  confidence: 'high',
+  title: 'Include the export type in telemetry',
+  improvement: 'Attach the already available export type to the completion event.',
+  benefit: 'This makes export-duration dashboards easier to segment.',
+  evidence: [{ path: 'src/export.ts', line: 24, behavior: 'The event omits the available type.' }],
+  suggestedChange: null,
+  mechanical: false,
+  priorFeedback: null,
+  reporters: [FEATURE_ANGLE],
+};
+
 const CLEAN_GATES = {
   reviewersComplete: true,
   reproductionComplete: true,
   materialUncertainty: false,
   verifierVerdict: 'clean',
   findings: [],
+  suggestions: [],
   failedRequiredChecks: [],
   headUnchanged: true,
 };
@@ -85,7 +100,7 @@ test('parseProtocolBlock accepts exactly one matching fenced JSON block', () => 
 });
 
 test('validateReviewResult accepts complete and needs-context envelopes', () => {
-  const complete = { status: 'complete', findings: [FINDING] };
+  const complete = { status: 'complete', findings: [FINDING], suggestions: [] };
   const needsContext = {
     status: 'needs-context',
     missingContext: ['The generated route table is not present.'],
@@ -107,7 +122,7 @@ test('validateReviewResult accepts complete and needs-context envelopes', () => 
 });
 
 test('validateReviewResult binds every first-pass finding to its assigned angle and reporter', () => {
-  const complete = { status: 'complete', findings: [FINDING] };
+  const complete = { status: 'complete', findings: [FINDING], suggestions: [] };
 
   assert.throws(() => validateReviewResult(complete), /expected angle/i);
   assert.throws(
@@ -124,6 +139,7 @@ test('validateReviewResult binds every first-pass finding to its assigned angle 
       () => validateReviewResult({
         status: 'complete',
         findings: [{ ...FINDING, reporters }],
+        suggestions: [],
       }, FEATURE_ANGLE),
       /findings\[0\]\.reporters.*exactly one.*assigned angle/i,
     );
@@ -141,7 +157,7 @@ test('validateReviewResult rejects every missing finding field', () => {
     delete finding[field];
     assert.throws(
       () => validateReviewResult(
-        { status: 'complete', findings: [finding] },
+        { status: 'complete', findings: [finding], suggestions: [] },
         FEATURE_ANGLE,
       ),
       new RegExp(`findings\\[0\\]\\.${field}`),
@@ -162,6 +178,7 @@ test('validateReviewResult rejects unsupported angles, low-value severities, and
       () => validateReviewResult({
         status: 'complete',
         findings: [{ ...FINDING, [field]: value }],
+        suggestions: [],
       }, FEATURE_ANGLE),
       new RegExp(`findings\\[0\\]\\.${field}`),
     );
@@ -182,7 +199,7 @@ test('validateReviewResult rejects invalid repository paths and non-positive lin
     finding.evidence[0].path = path;
     assert.throws(
       () => validateReviewResult(
-        { status: 'complete', findings: [finding] },
+        { status: 'complete', findings: [finding], suggestions: [] },
         FEATURE_ANGLE,
       ),
       /findings\[0\]\.evidence\[0\]\.path/,
@@ -194,7 +211,7 @@ test('validateReviewResult rejects invalid repository paths and non-positive lin
     finding.evidence[0].line = line;
     assert.throws(
       () => validateReviewResult(
-        { status: 'complete', findings: [finding] },
+        { status: 'complete', findings: [finding], suggestions: [] },
         FEATURE_ANGLE,
       ),
       /findings\[0\]\.evidence\[0\]\.line/,
@@ -210,12 +227,87 @@ test('validation preserves long structural paths and finding text without trunca
   finding.title = longTitle;
 
   const result = validateReviewResult(
-    { status: 'complete', findings: [finding] },
+    { status: 'complete', findings: [finding], suggestions: [] },
     FEATURE_ANGLE,
   );
 
   assert.equal(result.findings[0].evidence[0].path, longPath);
   assert.equal(result.findings[0].title, longTitle);
+});
+
+test('review results accept one high-confidence optional suggestion per angle', () => {
+  const result = validateReviewResult(
+    { status: 'complete', findings: [], suggestions: [SUGGESTION] },
+    FEATURE_ANGLE,
+  );
+
+  assert.deepEqual(result.suggestions, [SUGGESTION]);
+});
+
+test('review results require an explicit suggestions array and at most one item', () => {
+  assert.throws(
+    () => validateReviewResult({ status: 'complete', findings: [] }, FEATURE_ANGLE),
+    /review\.suggestions.*required/i,
+  );
+  assert.throws(
+    () => validateReviewResult({
+      status: 'complete',
+      findings: [],
+      suggestions: [SUGGESTION, SUGGESTION],
+    }, FEATURE_ANGLE),
+    /suggestions.*at most one/i,
+  );
+});
+
+test('review results reject malformed first-pass suggestions', () => {
+  const invalidSuggestions = [
+    [{ ...SUGGESTION, confidence: 'medium' }, /suggestions\[0\]\.confidence/],
+    [{ ...SUGGESTION, extra: true }, /unexpected field extra/],
+    [{ ...SUGGESTION, angle: SECURITY_ANGLE }, /suggestions\[0\]\.angle.*assigned angle/i],
+    [{ ...SUGGESTION, reporters: [SYSTEM_ANGLE] }, /suggestions\[0\]\.reporters.*assigned angle/i],
+    [{ ...SUGGESTION, evidence: [] }, /suggestions\[0\]\.evidence.*non-empty/i],
+    [{ ...SUGGESTION, priorFeedback: 'earlier note' }, /suggestions\[0\]\.priorFeedback/],
+    [{ ...SUGGESTION, suggestedChange: '' }, /suggestions\[0\]\.suggestedChange/],
+    [{ ...SUGGESTION, mechanical: 'false' }, /suggestions\[0\]\.mechanical/],
+  ];
+
+  for (const [suggestion, expected] of invalidSuggestions) {
+    assert.throws(
+      () => validateReviewResult({
+        status: 'complete', findings: [], suggestions: [suggestion],
+      }, FEATURE_ANGLE),
+      expected,
+    );
+  }
+});
+
+test('review results reject invalid suggestion paths and lines', () => {
+  for (const path of ['', '/etc/passwd', '../secrets.txt', 'src/../secrets.txt']) {
+    const suggestion = clone(SUGGESTION);
+    suggestion.evidence[0].path = path;
+    assert.throws(
+      () => validateReviewResult({
+        status: 'complete', findings: [], suggestions: [suggestion],
+      }, FEATURE_ANGLE),
+      /suggestions\[0\]\.evidence\[0\]\.path/,
+    );
+  }
+
+  for (const line of [0, -1, 1.5, '24', Number.MAX_SAFE_INTEGER + 1]) {
+    const suggestion = clone(SUGGESTION);
+    suggestion.evidence[0].line = line;
+    assert.throws(
+      () => validateReviewResult({
+        status: 'complete', findings: [], suggestions: [suggestion],
+      }, FEATURE_ANGLE),
+      /suggestions\[0\]\.evidence\[0\]\.line/,
+    );
+  }
+});
+
+test('suggestion IDs are distinct from finding IDs and capped at three', () => {
+  assert.equal(assignSuggestionIds([SUGGESTION])[0].id, 'BRS001');
+  assert.throws(() => assignSuggestionIds(Array(4).fill(SUGGESTION)), /at most 3/i);
 });
 
 test('assignStableIds sorts by severity, path, line, and title without mutating input', () => {
@@ -461,6 +553,12 @@ test('validateVerificationResult enforces verdicts and stable challenge targets'
         reportEffect: 'actionable',
       },
       {
+        target: 'BRS001',
+        evidence: 'The telemetry dimension is useful but remains optional.',
+        reason: 'The suggestion survives fresh-eyes review.',
+        reportEffect: 'none',
+      },
+      {
         target: 'approval',
         evidence: 'A required check is still failing.',
         reason: 'The clean verdict is contradicted.',
@@ -469,22 +567,75 @@ test('validateVerificationResult enforces verdicts and stable challenge targets'
     ],
   };
 
-  assert.deepEqual(validateVerificationResult(result), result);
+  assert.deepEqual(validateVerificationResult(result, ['BRS001']), result);
   assert.throws(
-    () => validateVerificationResult({ ...result, verdict: 'uncertain' }),
+    () => validateVerificationResult({ ...result, verdict: 'uncertain' }, ['BRS001']),
     /verdict/,
   );
   assert.throws(
     () => validateVerificationResult({
       ...result,
       challenges: [{ ...result.challenges[0], target: 'BRB1' }],
-    }),
+    }, []),
     /challenges\[0\]\.target/,
   );
   assert.throws(
-    () => validateVerificationResult({ ...result, extra: true }),
+    () => validateVerificationResult({
+      verdict: 'defer',
+      challenges: [{
+        target: 'BRS001',
+        evidence: 'The optional improvement needs more context.',
+        reason: 'Suggestions cannot carry deferred uncertainty.',
+        reportEffect: 'deferred',
+      }],
+    }, ['BRS001']),
+    /challenges\[0\]\.reportEffect.*incompatible.*BRS/i,
+  );
+  assert.throws(
+    () => validateVerificationResult({ ...result, extra: true }, ['BRS001']),
     /unexpected field extra/,
   );
+});
+
+test('validateVerificationResult binds exactly one challenge to every expected BRS ID', () => {
+  const challengeFor = (target, reportEffect = 'none') => ({
+    target,
+    evidence: `Evidence for ${target}.`,
+    reason: `${target} classification.`,
+    reportEffect,
+  });
+  const value = {
+    verdict: 'clean',
+    challenges: [challengeFor('BRS002'), challengeFor('BRS001', 'drop')],
+  };
+
+  assert.deepEqual(validateVerificationResult(value, ['BRS001', 'BRS002']), value);
+  assert.deepEqual(
+    validateVerificationResult({ verdict: 'clean', challenges: [] }, []),
+    { verdict: 'clean', challenges: [] },
+  );
+
+  for (const [verification, expectedIds, error] of [
+    [{ verdict: 'clean', challenges: [] }, ['BRS001'], /missing expected ID BRS001/i],
+    [{ verdict: 'clean', challenges: [challengeFor('BRS001')] }, [], /unexpected ID BRS001/i],
+    [{
+      verdict: 'clean',
+      challenges: [challengeFor('BRS001'), challengeFor('BRS001')],
+    }, ['BRS001'], /duplicate ID BRS001/i],
+    [{ verdict: 'clean', challenges: [] }, ['BRS001', 'BRS001'], /unique/i],
+    [{ verdict: 'clean', challenges: [] }, [
+      'BRS001',
+      'BRS002',
+      'BRS003',
+      'BRS004',
+    ], /at most 3/i],
+    [{ verdict: 'clean', challenges: [] }, ['BRB001'], /stable suggestion ID/i],
+  ]) {
+    assert.throws(
+      () => validateVerificationResult(verification, expectedIds),
+      error,
+    );
+  }
 });
 
 test('validateVerificationResult enforces fresh-eyes verdict and challenge semantics', () => {
@@ -504,7 +655,7 @@ test('validateVerificationResult enforces fresh-eyes verdict and challenge seman
     { verdict: 'clean', challenges: [{ ...challenge, target: 'approval', reportEffect: 'none' }] },
   ];
   for (const result of valid) {
-    assert.deepEqual(validateVerificationResult(result), result);
+    assert.deepEqual(validateVerificationResult(result, []), result);
   }
 
   for (const result of [
@@ -515,8 +666,68 @@ test('validateVerificationResult enforces fresh-eyes verdict and challenge seman
     { verdict: 'clean', challenges: [challenge] },
   ]) {
     assert.throws(
-      () => validateVerificationResult(result),
+      () => validateVerificationResult(result, []),
       /challenges.*incompatible.*verdict/i,
+    );
+  }
+});
+
+test('clean may drop expected suggestions and still permit approval after recomputation', () => {
+  const verification = validateVerificationResult({
+    verdict: 'clean',
+    challenges: [{
+      target: 'BRS001',
+      evidence: 'The proposed telemetry dimension is generic advice.',
+      reason: 'Remove the weak optional suggestion.',
+      reportEffect: 'drop',
+    }],
+  }, ['BRS001']);
+
+  assert.equal(verification.verdict, 'clean');
+  assert.equal(decideReviewEvent({
+    ...CLEAN_GATES,
+    verifierVerdict: verification.verdict,
+    suggestions: [],
+  }), 'APPROVE');
+
+  for (const challenge of [
+    {
+      target: 'BRS001',
+      evidence: 'The change is required for correctness.',
+      reason: 'Promote the suggestion to a finding.',
+      reportEffect: 'actionable',
+    },
+    {
+      target: 'BRB001',
+      evidence: 'The finding should be removed.',
+      reason: 'A finding change is report-changing.',
+      reportEffect: 'drop',
+    },
+    {
+      target: 'approval',
+      evidence: 'The approval state changed.',
+      reason: 'Approval challenges cannot change under clean.',
+      reportEffect: 'drop',
+    },
+    {
+      target: 'BRB001',
+      evidence: 'The finding remains uncertain.',
+      reason: 'Deferred uncertainty is incompatible with clean.',
+      reportEffect: 'deferred',
+    },
+    {
+      target: 'approval',
+      evidence: 'The approval state remains uncertain.',
+      reason: 'Deferred approval uncertainty is incompatible with clean.',
+      reportEffect: 'deferred',
+    },
+  ]) {
+    assert.throws(
+      () => validateVerificationResult(
+        { verdict: 'clean', challenges: [challenge] },
+        challenge.target === 'BRS001' ? ['BRS001'] : [],
+      ),
+      /incompatible with verdict clean/i,
     );
   }
 });
@@ -563,6 +774,9 @@ test('decideReviewEvent rejects invalid verdicts and non-array collection fields
     ['findings', ''],
     ['findings', {}],
     ['findings', null],
+    ['suggestions', ''],
+    ['suggestions', {}],
+    ['suggestions', null],
     ['failedRequiredChecks', ''],
     ['failedRequiredChecks', {}],
     ['failedRequiredChecks', null],
@@ -587,8 +801,40 @@ test('decideReviewEvent validates collection members before choosing an event', 
       new Error('Review is incomplete; update the marker only'),
     );
   }
+  for (const suggestion of [
+    null,
+    'suggestion',
+    {},
+    { id: 'BRB001' },
+    { id: 'BRS000' },
+    { id: 'BRS001', extra: true },
+  ]) {
+    assert.throws(
+      () => decideReviewEvent({ ...CLEAN_GATES, suggestions: [suggestion] }),
+      new Error('Review is incomplete; update the marker only'),
+    );
+  }
 
   assert.equal(decideReviewEvent({ ...CLEAN_GATES, findings: [{}] }), 'COMMENT');
+});
+
+test('suggestions do not prevent approval', () => {
+  assert.equal(decideReviewEvent({
+    ...CLEAN_GATES,
+    suggestions: [{ id: 'BRS001' }],
+  }), 'APPROVE');
+});
+
+test('decideReviewEvent rejects more than three or duplicate gate suggestions', () => {
+  for (const suggestions of [
+    ['BRS001', 'BRS002', 'BRS003', 'BRS004'].map((id) => ({ id })),
+    [{ id: 'BRS001' }, { id: 'BRS001' }],
+  ]) {
+    assert.throws(
+      () => decideReviewEvent({ ...CLEAN_GATES, suggestions }),
+      new Error('Review is incomplete; update the marker only'),
+    );
+  }
 });
 
 test('decideReviewEvent enforces marker-only, COMMENT, and APPROVE gates', () => {
@@ -610,7 +856,9 @@ test('decideReviewEvent enforces marker-only, COMMENT, and APPROVE gates', () =>
 test('main validates protocol blocks, selects candidates, and decides events read-only', async () => {
   const assigned = assignStableIds([FINDING]);
   const inputs = new Map([
-    ['review.txt', block('brb-review', { status: 'complete', findings: [FINDING] })],
+    ['review.txt', block('brb-review', {
+      status: 'complete', findings: [FINDING], suggestions: [],
+    })],
     ['synthesis.json', JSON.stringify({ findings: assigned })],
     ['gates.json', JSON.stringify(CLEAN_GATES)],
   ]);
@@ -630,7 +878,7 @@ test('main validates protocol blocks, selects candidates, and decides events rea
   await main(['decide-event', '--input', 'gates.json'], dependencies);
 
   assert.deepEqual(outputs, [
-    `${JSON.stringify({ status: 'complete', findings: [FINDING] })}\n`,
+    `${JSON.stringify({ status: 'complete', findings: [FINDING], suggestions: [] })}\n`,
     `${JSON.stringify(assigned)}\n`,
     'APPROVE\n',
   ]);
@@ -684,6 +932,36 @@ test('validate reproduction CLI binds results to the expected-IDs file', async (
   assert.deepEqual(JSON.parse(output), {
     results: expected.map(resultFor),
   });
+});
+
+test('validate verification CLI binds every suggestion to the expected-IDs file', async () => {
+  const expected = ['BRS001', 'BRS002'];
+  const verification = {
+    verdict: 'clean',
+    challenges: expected.map((target) => ({
+      target,
+      evidence: `Evidence for ${target}.`,
+      reason: `${target} remains optional.`,
+      reportEffect: 'none',
+    })),
+  };
+  const inputs = new Map([
+    ['expected.json', JSON.stringify(expected)],
+    ['verification.txt', block('brb-verification', verification)],
+  ]);
+  let output = '';
+
+  await main([
+    'validate',
+    '--kind', 'verification',
+    '--expected-ids-file', 'expected.json',
+    '--input', 'verification.txt',
+  ], {
+    readFile: async (path) => inputs.get(path),
+    writeStdout: (value) => { output += value; },
+  });
+
+  assert.deepEqual(JSON.parse(output), verification);
 });
 
 test('the executable exits non-zero with the marker-only error for invalid or incomplete gates', async (t) => {

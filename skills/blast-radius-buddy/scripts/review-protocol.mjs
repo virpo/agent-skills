@@ -48,6 +48,10 @@ const FINDING_FIELDS = [
   'deletionSensitive',
   'scopeUncertain',
 ];
+const SUGGESTION_FIELDS = [
+  'angle', 'confidence', 'title', 'improvement', 'benefit', 'evidence',
+  'suggestedChange', 'mechanical', 'priorFeedback', 'reporters',
+];
 const EVIDENCE_FIELDS = ['path', 'line', 'behavior'];
 const REPRODUCTION_RESULT_FIELDS = [
   'id',
@@ -70,6 +74,7 @@ const REVIEW_GATE_FIELDS = [
   'materialUncertainty',
   'verifierVerdict',
   'findings',
+  'suggestions',
   'failedRequiredChecks',
   'headUnchanged',
 ];
@@ -79,6 +84,7 @@ const SEVERITY_RANK = new Map([
   ['medium', 2],
 ]);
 const STABLE_ID_PATTERN = /^BRB(?:00[1-9]|0[1-9]\d|[1-9]\d{2,5})$/;
+const SUGGESTION_ID_PATTERN = /^BRS(?:00[1-9]|0[1-9]\d|[1-9]\d{2,5})$/;
 
 function plainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -156,6 +162,13 @@ function stableFindingId(value, path) {
   return value;
 }
 
+function stableSuggestionId(value, path) {
+  if (typeof value !== 'string' || !SUGGESTION_ID_PATTERN.test(value)) {
+    throw new TypeError(`${path} must be a stable suggestion ID`);
+  }
+  return value;
+}
+
 export function validateExpectedReproductionIds(value) {
   if (!Array.isArray(value) || value.length === 0) {
     throw new TypeError('expected reproduction IDs must be a non-empty array');
@@ -165,6 +178,22 @@ export function validateExpectedReproductionIds(value) {
   );
   if (new Set(expectedIds).size !== expectedIds.length) {
     throw new TypeError('expected reproduction IDs must be unique');
+  }
+  return expectedIds;
+}
+
+export function validateExpectedVerificationIds(value) {
+  if (!Array.isArray(value)) {
+    throw new TypeError('expected verification IDs must be an array');
+  }
+  if (value.length > 3) {
+    throw new TypeError('expected verification IDs must contain at most 3 items');
+  }
+  const expectedIds = value.map(
+    (id, index) => stableSuggestionId(id, `expected verification IDs[${index}]`),
+  );
+  if (new Set(expectedIds).size !== expectedIds.length) {
+    throw new TypeError('expected verification IDs must be unique');
   }
   return expectedIds;
 }
@@ -252,6 +281,55 @@ function normalizeFinding(value, path, expectedAngle) {
   };
 }
 
+function normalizeSuggestion(value, path, expectedAngle) {
+  assertExactFields(value, SUGGESTION_FIELDS, path);
+  if (!Array.isArray(value.evidence) || value.evidence.length === 0) {
+    throw new TypeError(`${path}.evidence must be a non-empty array`);
+  }
+  if (!Array.isArray(value.reporters)) {
+    throw new TypeError(`${path}.reporters must be an array`);
+  }
+  const angle = enumValue(value.angle, ANGLES, `${path}.angle`);
+  let reporters;
+  if (expectedAngle !== undefined) {
+    if (angle !== expectedAngle) {
+      throw new TypeError(`${path}.angle must match the assigned angle ${expectedAngle}`);
+    }
+    if (value.reporters.length !== 1 || value.reporters[0] !== expectedAngle) {
+      throw new TypeError(
+        `${path}.reporters must contain exactly one reporter matching the assigned angle`,
+      );
+    }
+    reporters = [expectedAngle];
+  } else {
+    reporters = normalizeSynthesisReporters(value.reporters, `${path}.reporters`);
+  }
+  if (value.confidence !== 'high') {
+    throw new TypeError(`${path}.confidence must be high`);
+  }
+  const suggestedChange = value.suggestedChange === null
+    ? null
+    : nonEmptyString(value.suggestedChange, `${path}.suggestedChange`);
+  if (value.priorFeedback !== null) {
+    throw new TypeError(`${path}.priorFeedback must be null`);
+  }
+
+  return {
+    angle,
+    confidence: 'high',
+    title: nonEmptyString(value.title, `${path}.title`),
+    improvement: nonEmptyString(value.improvement, `${path}.improvement`),
+    benefit: nonEmptyString(value.benefit, `${path}.benefit`),
+    evidence: value.evidence.map(
+      (item, index) => normalizeEvidence(item, `${path}.evidence[${index}]`),
+    ),
+    suggestedChange,
+    mechanical: booleanValue(value.mechanical, `${path}.mechanical`),
+    priorFeedback: null,
+    reporters,
+  };
+}
+
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -282,9 +360,15 @@ export function validateReviewResult(value, expectedAngle) {
   const normalizedExpectedAngle = assignedAngle(expectedAngle);
   assertObject(value, 'review');
   if (value.status === 'complete') {
-    assertExactFields(value, ['status', 'findings'], 'review');
+    assertExactFields(value, ['status', 'findings', 'suggestions'], 'review');
     if (!Array.isArray(value.findings)) {
       throw new TypeError('review.findings must be an array');
+    }
+    if (!Array.isArray(value.suggestions)) {
+      throw new TypeError('review.suggestions must be an array');
+    }
+    if (value.suggestions.length > 1) {
+      throw new TypeError('review.suggestions must contain at most one item');
     }
     return {
       status: 'complete',
@@ -292,6 +376,13 @@ export function validateReviewResult(value, expectedAngle) {
         (finding, index) => normalizeFinding(
           finding,
           `findings[${index}]`,
+          normalizedExpectedAngle,
+        ),
+      ),
+      suggestions: value.suggestions.map(
+        (suggestion, index) => normalizeSuggestion(
+          suggestion,
+          `suggestions[${index}]`,
           normalizedExpectedAngle,
         ),
       ),
@@ -330,6 +421,18 @@ function compareFindings(left, right) {
   return compareText(JSON.stringify(left), JSON.stringify(right));
 }
 
+function compareSuggestions(left, right) {
+  const leftEvidence = left.evidence?.[0];
+  const rightEvidence = right.evidence?.[0];
+  const path = compareText(leftEvidence?.path ?? '', rightEvidence?.path ?? '');
+  if (path !== 0) return path;
+  const line = (leftEvidence?.line ?? 0) - (rightEvidence?.line ?? 0);
+  if (line !== 0) return line;
+  const title = compareText(left.title ?? '', right.title ?? '');
+  if (title !== 0) return title;
+  return compareText(JSON.stringify(left), JSON.stringify(right));
+}
+
 export function assignStableIds(findings) {
   if (!Array.isArray(findings)) {
     throw new TypeError('findings must be an array');
@@ -346,6 +449,16 @@ export function assignStableIds(findings) {
       ...finding,
       id: `BRB${String(index + 1).padStart(3, '0')}`,
     }));
+}
+
+export function assignSuggestionIds(suggestions) {
+  if (!Array.isArray(suggestions) || suggestions.length > 3) {
+    throw new TypeError('suggestions must contain at most 3 items');
+  }
+  return suggestions.toSorted(compareSuggestions).map((suggestion, index) => ({
+    ...normalizeSuggestion(suggestion, `suggestions[${index}]`),
+    id: `BRS${String(index + 1).padStart(3, '0')}`,
+  }));
 }
 
 function directEvidence(evidence) {
@@ -427,22 +540,34 @@ export function validateReproductionResult(value, expectedIds) {
 
 function normalizeChallenge(value, path) {
   assertExactFields(value, CHALLENGE_FIELDS, path);
-  const target = value.target === 'approval'
-    ? 'approval'
-    : stableFindingId(value.target, `${path}.target`);
+  let target;
+  if (value.target === 'approval') {
+    target = 'approval';
+  } else if (typeof value.target === 'string' && SUGGESTION_ID_PATTERN.test(value.target)) {
+    target = stableSuggestionId(value.target, `${path}.target`);
+  } else {
+    target = stableFindingId(value.target, `${path}.target`);
+  }
+  const reportEffect = enumValue(
+    value.reportEffect,
+    VERIFICATION_REPORT_EFFECTS,
+    `${path}.reportEffect`,
+  );
+  if (target !== 'approval'
+    && SUGGESTION_ID_PATTERN.test(target)
+    && reportEffect === 'deferred') {
+    throw new TypeError(`${path}.reportEffect is incompatible with BRS target`);
+  }
   return {
     target,
     evidence: nonEmptyString(value.evidence, `${path}.evidence`),
     reason: nonEmptyString(value.reason, `${path}.reason`),
-    reportEffect: enumValue(
-      value.reportEffect,
-      VERIFICATION_REPORT_EFFECTS,
-      `${path}.reportEffect`,
-    ),
+    reportEffect,
   };
 }
 
-export function validateVerificationResult(value) {
+export function validateVerificationResult(value, expectedIds) {
+  const normalizedExpectedIds = validateExpectedVerificationIds(expectedIds);
   assertExactFields(value, ['verdict', 'challenges'], 'verification');
   if (!Array.isArray(value.challenges)) {
     throw new TypeError('verification.challenges must be an array');
@@ -451,10 +576,31 @@ export function validateVerificationResult(value) {
   const challenges = value.challenges.map(
     (challenge, index) => normalizeChallenge(challenge, `challenges[${index}]`),
   );
+  const expected = new Set(normalizedExpectedIds);
+  const classified = new Set();
+  for (const challenge of challenges) {
+    if (!SUGGESTION_ID_PATTERN.test(challenge.target)) continue;
+    if (!expected.has(challenge.target)) {
+      throw new TypeError(`verification.challenges has unexpected ID ${challenge.target}`);
+    }
+    if (classified.has(challenge.target)) {
+      throw new TypeError(`verification.challenges has duplicate ID ${challenge.target}`);
+    }
+    classified.add(challenge.target);
+  }
+  for (const id of normalizedExpectedIds) {
+    if (!classified.has(id)) {
+      throw new TypeError(`verification.challenges is missing expected ID ${id}`);
+    }
+  }
   const effects = new Set(challenges.map(({ reportEffect }) => reportEffect));
+  const cleanHasReportChange = challenges.some(({ target, reportEffect }) => (
+    reportEffect !== 'none'
+    && !(reportEffect === 'drop' && SUGGESTION_ID_PATTERN.test(target))
+  ));
   const incompatible = (
-    ((verdict === 'uphold' || verdict === 'clean')
-      && [...effects].some((effect) => effect !== 'none'))
+    (verdict === 'uphold' && [...effects].some((effect) => effect !== 'none'))
+    || (verdict === 'clean' && cleanHasReportChange)
     || (verdict === 'modify'
       && (challenges.length === 0 || ![...effects].some((effect) => effect !== 'none')))
     || (verdict === 'defer' && !effects.has('deferred'))
@@ -481,12 +627,24 @@ function validReviewGateEnvelope(value) {
     || !VERIFICATION_VERDICTS.has(value.verifierVerdict)
     || !Array.isArray(value.findings)
     || !value.findings.every((finding) => plainObject(finding))
+    || !Array.isArray(value.suggestions)
+    || value.suggestions.length > 3
+    || !value.suggestions.every((suggestion) => {
+      if (!plainObject(suggestion)) return false;
+      const suggestionKeys = Reflect.ownKeys(suggestion);
+      return suggestionKeys.length === 1
+        && suggestionKeys[0] === 'id'
+        && typeof suggestion.id === 'string'
+        && SUGGESTION_ID_PATTERN.test(suggestion.id);
+    })
     || !Array.isArray(value.failedRequiredChecks)
     || !value.failedRequiredChecks.every(
       (check) => typeof check === 'string' && check.trim().length > 0,
     )) {
     return false;
   }
+  const suggestionIds = value.suggestions.map(({ id }) => id);
+  if (new Set(suggestionIds).size !== suggestionIds.length) return false;
   return true;
 }
 
@@ -520,7 +678,7 @@ function usage() {
     'Usage:',
     '  review-protocol.mjs validate --kind review --angle ANGLE --input FILE',
     '  review-protocol.mjs validate --kind reproduction --expected-ids-file IDS.json --input FILE',
-    '  review-protocol.mjs validate --kind verification --input FILE',
+    '  review-protocol.mjs validate --kind verification --expected-ids-file IDS.json --input FILE',
     '  review-protocol.mjs select-reproduction --input SYNTHESIS.json',
     '  review-protocol.mjs decide-event --input GATES.json',
   ].join('\n');
@@ -582,10 +740,13 @@ export async function main(args, dependencies = {}) {
       ));
       validate = (value) => validateReproductionResult(value, expectedIds);
     } else if (kind === 'verification') {
-      if (options.angle !== undefined || options['expected-ids-file'] !== undefined) {
-        throw new Error(usage());
-      }
-      validate = validateVerificationResult;
+      if (options.angle !== undefined) throw new Error(usage());
+      const expectedIdsFile = requireOption(options, 'expected-ids-file');
+      const expectedIds = validateExpectedVerificationIds(parseJsonInput(
+        await readFile(expectedIdsFile, 'utf8'),
+        expectedIdsFile,
+      ));
+      validate = (value) => validateVerificationResult(value, expectedIds);
     } else {
       throw new Error(usage());
     }

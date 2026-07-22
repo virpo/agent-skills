@@ -1,4 +1,4 @@
-# Finding validation
+# Finding and suggestion validation
 
 Use validation as a confidence gate, never as a repair exercise.
 
@@ -51,19 +51,32 @@ Attack only:
 
 - false positives and unsupported causality;
 - incorrect scope or severity;
+- suggestions whose evidence or benefit does not justify a high-confidence optional improvement;
 - mistaken prior-feedback status or duplicate treatment;
 - unsafe, non-mechanical, or over-broad suggested changes;
 - an unjustified `APPROVE` event or a clean verdict contradicted by evidence.
 
-Do not start a fourth broad review. Classify the synthesis as:
+Do not start a fourth broad review.
+
+Enter fresh-eyes verification with at most three synthesized suggestions, each carrying its stable `BRS001`-style ID. Verification requires `--expected-ids-file` containing the complete host-selected BRS ID array. The array may be empty; otherwise every ID must be a unique valid BRS ID. The validator requires one BRS challenge per expected ID and rejects any omission, extra ID, or duplicate classification while still allowing relevant `BRB` and `approval` challenges.
+
+Classify every suggestion as `keep`, `promote`, or `drop`:
+
+- `keep`: the change remains a concrete, evidence-backed improvement and the pull request is correct without it;
+- `promote`: the evidence shows a defect that should be fixed; turn it into a finding and recompute the report and proposed event;
+- `drop`: remove a weak, generic, duplicative, or uncertain suggestion.
+
+Encode `keep` as a `none` challenge effect on its `BRS` ID, `promote` as `actionable`, and `drop` as `drop`. An uncertain suggestion is dropped, never deferred. Preserve the IDs of surviving suggestions.
+
+Classify the synthesis as:
 
 - `uphold`: retain the finding-bearing synthesis and proposed `COMMENT`;
 - `modify`: apply the specific challenges and recompute the report;
 - `defer`: move material unresolved uncertainty to deferred and use `COMMENT`;
 - `drop`: remove the challenged findings and recompute the event;
-- `clean`: uphold a clean synthesis for approval-gate evaluation.
+- `clean`: uphold a correct synthesis after applying any optional-suggestion drops, then evaluate the approval gates.
 
-Apply each challenge's `reportEffect`: `actionable` keeps or changes a finding, `deferred` exposes material uncertainty, `drop` removes it, and `none` changes nothing. Return only one fenced `brb-verification` block, with no prose before or after it, containing this exact envelope:
+Apply each challenge's `reportEffect`: for a `BRB` target, `actionable` keeps or changes a finding, `deferred` exposes material uncertainty, `drop` removes it, and `none` changes nothing. For a `BRS` target, `none` keeps the suggestion, `actionable` promotes it to a finding and requires the event to be recomputed, and `drop` removes it; `deferred` is invalid. Return only one fenced `brb-verification` block, with no prose before or after it, containing this exact envelope:
 
 The validator enforces these verdict semantics:
 
@@ -71,8 +84,8 @@ The validator enforces these verdict semantics:
 - `modify`: at least one challenge has an `actionable`, `deferred`, or `drop` effect.
 - `defer`: at least one challenge has a `deferred` effect.
 - `drop`: at least one challenge has a `drop` effect.
-- `clean`: challenges are empty or use only `none`; never pair `clean` with `actionable`, `deferred`, or `drop`.
+- `clean`: every expected BRS challenge uses `none` or `drop`. `clean` with a BRS `drop` removes the weak suggestion, recomputes the report, and may proceed to `APPROVE` when every other gate passes. `clean` rejects BRS `actionable`, every `deferred` effect, and report-changing `BRB` or `approval` effects.
 
 ```brb-verification
-{"verdict":"uphold | modify | defer | drop | clean","challenges":[{"target":"BRB001 | approval","evidence":"specific fact","reason":"short reason","reportEffect":"actionable | deferred | drop | none"}]}
+{"verdict":"clean","challenges":[{"target":"BRS001","evidence":"specific fact","reason":"keep or drop reason","reportEffect":"none | drop"}]}
 ```

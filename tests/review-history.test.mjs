@@ -667,6 +667,65 @@ test('review-linkage fingerprint coalesces root metadata and inline thread in on
   assert.deepEqual(entries[0].statuses, ['open', 'reported']);
 });
 
+test('suggestion history coalesces within one review and remains visible across reviews', async () => {
+  const linkage = `BRBK1_${'e'.repeat(64)}`;
+  const metadata = {
+    findings: [],
+    suggestions: [{
+      id: 'BRS001',
+      linkage,
+      title: 'Include the export type in telemetry',
+      path: 'src/export.ts',
+      line: 24,
+    }],
+  };
+  const execute = fakeExecute([
+    makeThreadPage({
+      nodes: [{
+        id: 'T-suggestion',
+        isResolved: false,
+        isOutdated: false,
+        resolvedBy: null,
+        comments: { nodes: [comment({
+          id: 'C-suggestion',
+          body: `Non-blocking suggestion\n\n<!-- blast-radius-buddy-suggestion:BRS001:${linkage} -->`,
+          url: 'https://example/thread-suggestion',
+          path: 'src/export.ts',
+          line: 24,
+          reviewId: 'R-suggestion',
+        })] },
+      }],
+    }),
+    makeReviewPage({
+      nodes: ['R-suggestion', 'R-separate'].map((id) => ({
+        id,
+        body: `<!-- blast-radius-buddy-review:${JSON.stringify(metadata)} -->`,
+        url: `https://example/${id}`,
+        state: 'APPROVED',
+        author: { login: 'buddy' },
+      })),
+    }),
+    { stdout: '[[]]' },
+  ]);
+
+  const entries = await loadReviewLedger({
+    repo: 'acme/widget', number: 19, headSha: 'abcdef0', prAuthor: 'author', execute,
+  });
+
+  assert.equal(entries.length, 2);
+  assert.deepEqual(entries.map(({ id }) => id), ['BRS001', 'BRS001']);
+  assert.deepEqual(entries.map(({ canonicalKey }) => canonicalKey), [
+    `review:R-suggestion:${linkage}`,
+    `review:R-separate:${linkage}`,
+  ]);
+  assert.deepEqual(entries[0].statuses, ['open', 'reported']);
+  assert.deepEqual(entries[0].urls, [
+    'https://example/thread-suggestion',
+    'https://example/R-suggestion',
+  ]);
+  assert.deepEqual(entries[1].statuses, ['reported']);
+});
+
 test('identical review-linkage fingerprints from separate reviews remain visible', async () => {
   const linkage = `BRBK1_${'b'.repeat(64)}`;
   const metadata = {

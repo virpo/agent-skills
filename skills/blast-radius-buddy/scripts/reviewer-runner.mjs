@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import {
   parseProtocolBlock,
   validateExpectedReproductionIds,
+  validateExpectedVerificationIds,
   validateReproductionResult,
   validateReviewResult,
   validateVerificationResult,
@@ -289,7 +290,7 @@ function usage() {
     'Usage:',
     '  reviewer-runner.mjs run-claude --prompt-file FILE --protocol brb-review --angle ANGLE --timeout-ms NUMBER --output FILE',
     '  reviewer-runner.mjs run-claude --prompt-file FILE --protocol brb-reproduction --expected-ids-file IDS.json --timeout-ms NUMBER --output FILE',
-    '  reviewer-runner.mjs run-claude --prompt-file FILE --protocol brb-verification --timeout-ms NUMBER --output FILE',
+    '  reviewer-runner.mjs run-claude --prompt-file FILE --protocol brb-verification --expected-ids-file IDS.json --timeout-ms NUMBER --output FILE',
   ].join('\n');
 }
 
@@ -338,7 +339,7 @@ function protocolValidator(protocol, angle, expectedIds) {
   const validators = {
     'brb-review': (value) => validateReviewResult(value, angle),
     'brb-reproduction': (value) => validateReproductionResult(value, expectedIds),
-    'brb-verification': validateVerificationResult,
+    'brb-verification': (value) => validateVerificationResult(value, expectedIds),
   };
   const validate = validators[protocol];
   if (!validate) throw new TypeError('--protocol is unsupported');
@@ -348,11 +349,12 @@ function protocolValidator(protocol, angle, expectedIds) {
   if (protocol !== 'brb-review' && angle !== undefined) {
     throw new TypeError('--angle is supported only for brb-review');
   }
-  if (protocol === 'brb-reproduction' && expectedIds === undefined) {
-    throw new TypeError('--expected-ids-file is required for brb-reproduction');
+  if ((protocol === 'brb-reproduction' || protocol === 'brb-verification')
+    && expectedIds === undefined) {
+    throw new TypeError(`--expected-ids-file is required for ${protocol}`);
   }
-  if (protocol !== 'brb-reproduction' && expectedIds !== undefined) {
-    throw new TypeError('--expected-ids-file is supported only for brb-reproduction');
+  if (protocol === 'brb-review' && expectedIds !== undefined) {
+    throw new TypeError('--expected-ids-file is not supported for brb-review');
   }
   return (output) => validate(parseProtocolBlock(output, protocol));
 }
@@ -386,8 +388,14 @@ export async function main(args, dependencies = {}) {
       await readFile(path, 'utf8'),
       path,
     ));
+  } else if (protocol === 'brb-verification') {
+    const path = requireOption(options, 'expected-ids-file');
+    expectedIds = validateExpectedVerificationIds(parseJsonInput(
+      await readFile(path, 'utf8'),
+      path,
+    ));
   } else if (expectedIdsFile !== undefined) {
-    throw new TypeError('--expected-ids-file is supported only for brb-reproduction');
+    throw new TypeError('--expected-ids-file is not supported for brb-review');
   }
   const validate = protocolValidator(protocol, angle, expectedIds);
   const prompt = await readFile(promptFile, 'utf8');

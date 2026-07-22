@@ -2,6 +2,8 @@
 
 Give each fresh first-pass reviewer only one rubric. Do not share another reviewer's output before synthesis.
 
+Seek consequential defects first. Then optionally return at most one high-confidence suggestion per angle: a concrete, evidence-backed improvement that the author may ignore indefinitely because the pull request is correct without it. Style, naming, formatting, nits, and generic advice are omitted. Return both exact `findings` and `suggestions` arrays, even when either is empty.
+
 Bind validation to the assigned angle. Pass the canonical angle slug with `--angle` to `reviewer-runner.mjs run-claude` or `review-protocol.mjs validate`. Each first-pass finding's `angle` must equal that assigned angle, and `reporters` must contain exactly one reporter matching the assigned angle. The validator rejects mismatches and normalizes the reporter to that canonical slug.
 
 Use these exact canonical slugs; never shorten them:
@@ -53,11 +55,11 @@ Use only `critical`, `high`, or `medium`:
 - `high`: reachable consequential user, data, security, availability, deployment, or compatibility failure;
 - `medium`: observable incorrect behavior, a security or reliability weakness, a significant user-facing regression, or a broken contract in code changed or directly affected by the PR.
 
-Use `high` or `medium` confidence. Support every finding with a concrete mechanism, reachability, impact, and repository-relative evidence. Use a new-side line when available. Set `suggestedChange` and `mechanical` according to the inline-suggestion eligibility in `github-report.md`. Set proof-risk booleans explicitly. The host assigns run-local IDs after synthesis; `github-review.mjs prepare` derives a review-linkage fingerprint only for joining root and inline records from the same GitHub review.
+Use `high` or `medium` confidence for findings and only `high` confidence for suggestions. Support every finding with a concrete mechanism, reachability, impact, and repository-relative evidence; use a new-side line when available. Support every suggestion with a concrete improvement and benefit. Every suggestion must cite at least one PR-relative new-side changed line. Set `suggestedChange` and `mechanical` according to the inline-suggestion eligibility in `github-report.md`. Set proof-risk booleans explicitly. The host assigns run-local `BRB` finding and `BRS` suggestion IDs after synthesis; `github-review.mjs prepare` derives a review-linkage fingerprint only for joining root and inline records from the same GitHub review.
 
 ## Output contract
 
-Return only one fenced `brb-review` block, with no prose before or after it. For a completed review, including one with no findings, use this exact envelope and exact fields. Substitute the assigned canonical angle slug for both `<assigned-angle>` values:
+Return only one fenced `brb-review` block, with no prose before or after it. For a completed review, including one with no findings or suggestions, use this exact envelope and exact fields. Substitute the assigned canonical angle slug for every `<assigned-angle>` value:
 
 ```brb-review
 {
@@ -82,6 +84,20 @@ Return only one fenced `brb-review` block, with no prose before or after it. For
       "securitySensitive": false,
       "deletionSensitive": false,
       "scopeUncertain": false
+    }
+  ],
+  "suggestions": [
+    {
+      "angle": "<assigned-angle>",
+      "confidence": "high",
+      "title": "concise optional improvement",
+      "improvement": "concrete change that is not required for correctness",
+      "benefit": "specific benefit if the author chooses to apply it",
+      "evidence": [{ "path": "repo/relative", "line": 1, "behavior": "supporting fact" }],
+      "suggestedChange": null,
+      "mechanical": false,
+      "priorFeedback": null,
+      "reporters": ["<assigned-angle>"]
     }
   ]
 }

@@ -14,7 +14,7 @@ npx skills add virpo/agent-skills --skill look-hard
 
 ### 🧨 Blast Radius Buddy
 
-Review a GitHub pull request through security, system blast-radius, and feature-truth angles. Validate consequential findings with a host-selected diagnostic in an isolated checkout plus tool-less classification, ignore nits, and submit a gate-derived native comment or approval without changing the branch.
+Review a GitHub pull request through security, system blast-radius, and feature-truth angles. Validate consequential findings with a host-selected diagnostic in an isolated checkout plus tool-less classification, ignore nits, and submit a gate-derived native comment or approval without changing the branch. A correct PR may still receive approval with up to three evidence-backed, non-blocking suggestions.
 
 Blast Radius Buddy keeps every prior review visible. Cross-run duplicates require host semantic judgment over the complete ledger; run-local IDs and review-linkage fingerprints never suppress another review automatically.
 

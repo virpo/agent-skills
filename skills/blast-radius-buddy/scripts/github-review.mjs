@@ -14,7 +14,10 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { assertHeadUnchanged } from './github-pr.mjs';
-import { decideReviewEvent } from './review-protocol.mjs';
+import {
+  decideReviewEvent,
+  validateVerificationResult,
+} from './review-protocol.mjs';
 
 const execFileAsync = promisify(execFile);
 const OPENING = "🧨 The shake is over; here's what held and what came loose.";
@@ -27,20 +30,29 @@ const ACTIONABLE_SEVERITIES = new Set(['critical', 'high', 'medium']);
 const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const HEAD_SHA_PATTERN = /^[0-9a-f]{40}$/i;
 const FINDING_ID_PATTERN = /^BRB(?:00[1-9]|0[1-9]\d|[1-9]\d{2,5})$/;
+const SUGGESTION_ID_PATTERN = /^BRS(?:00[1-9]|0[1-9]\d|[1-9]\d{2,5})$/;
 const FINDING_MARKER_PATTERN = /<!-- blast-radius-buddy-finding:BRB(?:00[1-9]|0[1-9]\d|[1-9]\d{2,5})(?::BRBK1_[0-9a-f]{64})? -->$/;
+const SUGGESTION_MARKER_PATTERN = /<!-- blast-radius-buddy-suggestion:BRS(?:00[1-9]|0[1-9]\d|[1-9]\d{2,5}):BRBK1_[0-9a-f]{64} -->$/;
 const REPORT_FIELDS = [
-  'verdict', 'headSha', 'findings', 'priorFeedback', 'validation', 'deferred', 'coverage',
+  'verdict', 'headSha', 'findings', 'suggestions', 'priorFeedback', 'validation', 'deferred',
+  'coverage',
 ];
 const REPORT_FINDING_FIELDS = [
   'id', 'severity', 'confidence', 'title', 'what', 'why', 'impact', 'evidence',
   'suggestedFix', 'suggestedChange', 'mechanical',
 ];
 const REPORT_EVIDENCE_FIELDS = ['path', 'line', 'behavior'];
+const REPORT_SUGGESTION_FIELDS = [
+  'id', 'confidence', 'title', 'improvement', 'benefit', 'evidence',
+  'suggestedChange', 'mechanical',
+];
 const PRIOR_FEEDBACK_FIELDS = ['id', 'status', 'summary', 'path', 'line'];
 const COVERAGE_FIELDS = ['security', 'blastRadius', 'featureTruth'];
 const SUBMISSION_FIELDS = [
-  'repo', 'number', 'report', 'diff', 'gates', 'body', 'comments', 'execute',
+  'repo', 'number', 'report', 'diff', 'gates', 'verification', 'body', 'comments', 'execute',
 ];
+const VERIFICATION_ARTIFACT_FIELDS = ['result', 'suggestions', 'promotions'];
+const PROMOTION_FIELDS = ['suggestionId', 'finding'];
 
 const defaultExecute = (command, args) => execFileAsync(command, args, {
   encoding: 'utf8',
@@ -118,6 +130,13 @@ function stableFindingId(value, label = 'finding.id') {
   return value;
 }
 
+function stableSuggestionId(value, label = 'suggestion.id') {
+  if (typeof value !== 'string' || !SUGGESTION_ID_PATTERN.test(value)) {
+    throw new TypeError(`${label} must be a stable suggestion ID`);
+  }
+  return value;
+}
+
 function enumValue(value, values, label) {
   if (!values.has(value)) throw new TypeError(`${label} is unsupported`);
   return value;
@@ -132,8 +151,7 @@ function normalizeReportEvidence(value, label) {
   };
 }
 
-function normalizeReportFinding(value, index) {
-  const label = `report.findings[${index}]`;
+function normalizeFinding(value, label) {
   assertExactFields(value, REPORT_FINDING_FIELDS, label);
   if (!Array.isArray(value.evidence) || value.evidence.length === 0) {
     throw new TypeError(`${label}.evidence must be a non-empty array`);
@@ -168,6 +186,123 @@ function normalizeReportFinding(value, index) {
   };
 }
 
+function normalizeReportFinding(value, index) {
+  return normalizeFinding(value, `report.findings[${index}]`);
+}
+
+function normalizeSuggestion(value, label) {
+  assertExactFields(value, REPORT_SUGGESTION_FIELDS, label);
+  if (!Array.isArray(value.evidence) || value.evidence.length === 0) {
+    throw new TypeError(`${label}.evidence must be a non-empty array`);
+  }
+  const suggestedChange = value.suggestedChange === null
+    ? null
+    : nonEmptyString(value.suggestedChange, `${label}.suggestedChange`);
+  if (typeof value.mechanical !== 'boolean') {
+    throw new TypeError(`${label}.mechanical must be a boolean`);
+  }
+  const evidence = value.evidence.map(
+    (item, evidenceIndex) => normalizeReportEvidence(item, `${label}.evidence[${evidenceIndex}]`),
+  );
+  if (value.mechanical && suggestedChange === null) {
+    throw new TypeError(`${label}.suggestedChange is required when mechanical is true`);
+  }
+  if (value.mechanical && new Set(evidence.map(({ path }) => path)).size !== 1) {
+    throw new TypeError(`${label}.mechanical suggestion must affect one evidence path`);
+  }
+  return {
+    id: stableSuggestionId(value.id, `${label}.id`),
+    confidence: enumValue(value.confidence, new Set(['high']), `${label}.confidence`),
+    title: nonEmptyString(value.title, `${label}.title`),
+    improvement: nonEmptyString(value.improvement, `${label}.improvement`),
+    benefit: nonEmptyString(value.benefit, `${label}.benefit`),
+    evidence,
+    suggestedChange,
+    mechanical: value.mechanical,
+  };
+}
+
+function normalizeReportSuggestion(value, index) {
+  return normalizeSuggestion(value, `report.suggestions[${index}]`);
+}
+
+function validateVerificationArtifact(value) {
+  if (value === undefined) throw new TypeError('verification artifact is required');
+  assertExactFields(value, VERIFICATION_ARTIFACT_FIELDS, 'verification artifact');
+  if (!Array.isArray(value.suggestions)) {
+    throw new TypeError('verification artifact.suggestions must be an array');
+  }
+  if (value.suggestions.length > 3) {
+    throw new TypeError('verification artifact.suggestions must contain at most 3 items');
+  }
+  const suggestions = value.suggestions.map(
+    (suggestion, index) => normalizeSuggestion(
+      suggestion,
+      `verification artifact.suggestions[${index}]`,
+    ),
+  );
+  const suggestionIds = new Set();
+  for (const suggestion of suggestions) {
+    if (suggestionIds.has(suggestion.id)) {
+      throw new TypeError(`duplicate suggestion ID ${suggestion.id}`);
+    }
+    suggestionIds.add(suggestion.id);
+  }
+  const result = validateVerificationResult(value.result, suggestions.map(({ id }) => id));
+  if (!Array.isArray(value.promotions)) {
+    throw new TypeError('verification artifact.promotions must be an array');
+  }
+  if (value.promotions.length > 3) {
+    throw new TypeError('verification artifact.promotions must contain at most 3 items');
+  }
+  const promotions = value.promotions.map((promotion, index) => {
+    const label = `verification artifact.promotions[${index}]`;
+    assertExactFields(promotion, PROMOTION_FIELDS, label);
+    return {
+      suggestionId: stableSuggestionId(promotion.suggestionId, `${label}.suggestionId`),
+      finding: normalizeFinding(promotion.finding, `${label}.finding`),
+    };
+  });
+  const promotionSuggestionIds = new Set();
+  const promotionFindingIds = new Set();
+  for (const promotion of promotions) {
+    if (promotionSuggestionIds.has(promotion.suggestionId)) {
+      throw new TypeError(
+        `verification artifact.promotions has duplicate suggestion ID ${promotion.suggestionId}`,
+      );
+    }
+    if (promotionFindingIds.has(promotion.finding.id)) {
+      throw new TypeError(
+        `verification artifact.promotions has duplicate finding ID ${promotion.finding.id}`,
+      );
+    }
+    promotionSuggestionIds.add(promotion.suggestionId);
+    promotionFindingIds.add(promotion.finding.id);
+  }
+  const actionableSuggestionIds = new Set(
+    result.challenges
+      .filter(({ target, reportEffect }) => (
+        SUGGESTION_ID_PATTERN.test(target) && reportEffect === 'actionable'
+      ))
+      .map(({ target }) => target),
+  );
+  for (const { suggestionId } of promotions) {
+    if (!actionableSuggestionIds.has(suggestionId)) {
+      throw new TypeError(
+        `verification artifact.promotions has unexpected suggestion ${suggestionId}`,
+      );
+    }
+  }
+  for (const suggestionId of actionableSuggestionIds) {
+    if (!promotionSuggestionIds.has(suggestionId)) {
+      throw new TypeError(
+        `verification artifact.promotions is missing actionable suggestion ${suggestionId}`,
+      );
+    }
+  }
+  return { result, suggestions, promotions };
+}
+
 function normalizePriorFeedback(value, index) {
   const label = `report.priorFeedback[${index}]`;
   assertExactFields(value, PRIOR_FEEDBACK_FIELDS, label);
@@ -197,14 +332,28 @@ export function validateNormalizedReport(value) {
   const verdict = enumValue(value.verdict, VERDICTS, 'report.verdict');
   const headSha = fullHeadSha(value.headSha);
   if (!Array.isArray(value.findings)) throw new TypeError('report.findings must be an array');
+  if (!Array.isArray(value.suggestions)) {
+    throw new TypeError('report.suggestions must be an array');
+  }
+  if (value.suggestions.length > 3) {
+    throw new TypeError('report.suggestions must contain at most 3 items');
+  }
   if (!Array.isArray(value.priorFeedback)) {
     throw new TypeError('report.priorFeedback must be an array');
   }
   const findings = value.findings.map(normalizeReportFinding);
+  const suggestions = value.suggestions.map(normalizeReportSuggestion);
   const findingIds = new Set();
   for (const finding of findings) {
     if (findingIds.has(finding.id)) throw new TypeError(`duplicate finding ID ${finding.id}`);
     findingIds.add(finding.id);
+  }
+  const suggestionIds = new Set();
+  for (const suggestion of suggestions) {
+    if (suggestionIds.has(suggestion.id)) {
+      throw new TypeError(`duplicate suggestion ID ${suggestion.id}`);
+    }
+    suggestionIds.add(suggestion.id);
   }
   const deferred = normalizeStringArray(value.deferred, 'report.deferred');
   if (verdict === 'Approve' && findings.length > 0) {
@@ -227,6 +376,7 @@ export function validateNormalizedReport(value) {
     verdict,
     headSha,
     findings,
+    suggestions,
     priorFeedback: value.priorFeedback.map(normalizePriorFeedback),
     validation: normalizeStringArray(value.validation, 'report.validation'),
     deferred,
@@ -260,6 +410,22 @@ export function findingReviewLinkage(finding) {
   return `BRBK1_${createHash('sha256').update(identity).digest('hex')}`;
 }
 
+function suggestionReviewLinkage(suggestion) {
+  if (!plainObject(suggestion)) throw new TypeError('suggestion must be an object');
+  const paths = Array.isArray(suggestion.evidence)
+    ? [...new Set(suggestion.evidence
+      .filter(plainObject)
+      .map(({ path }) => (typeof path === 'string' ? path : ''))
+      .filter((path) => path.length > 0))].sort()
+    : [];
+  const identity = JSON.stringify({
+    paths,
+    title: semanticText(suggestion.title),
+    improvement: semanticText(suggestion.improvement),
+  });
+  return `BRBK1_${createHash('sha256').update(identity).digest('hex')}`;
+}
+
 function findingAnchor(finding) {
   if (!Array.isArray(finding?.evidence)) return { path: null, line: null };
   const evidence = finding.evidence.find((item) => plainObject(item)
@@ -271,7 +437,7 @@ function findingAnchor(finding) {
 
 function visibleText(value) {
   return value.replace(
-    /<!--(?=\s*blast-radius-buddy-(?:review|finding):)/g,
+    /<!--(?=\s*blast-radius-buddy-(?:review|finding|suggestion):)/g,
     '&lt;!--',
   );
 }
@@ -282,7 +448,7 @@ function escapeMetadataJson(value) {
   return JSON.stringify(value).replaceAll('--', '-\\u002d');
 }
 
-function metadataFor(headSha, findings) {
+function metadataFor(headSha, findings, suggestions) {
   return {
     headSha,
     findings: findings.map((finding, index) => {
@@ -291,6 +457,16 @@ function metadataFor(headSha, findings) {
         id: stableFindingId(finding.id, `findings[${index}].id`),
         linkage: findingReviewLinkage(finding),
         title: nonEmptyString(finding.title, `findings[${index}].title`),
+        path,
+        line,
+      };
+    }),
+    suggestions: suggestions.map((suggestion, index) => {
+      const { path, line } = findingAnchor(suggestion);
+      return {
+        id: stableSuggestionId(suggestion.id, `suggestions[${index}].id`),
+        linkage: suggestionReviewLinkage(suggestion),
+        title: nonEmptyString(suggestion.title, `suggestions[${index}].title`),
         path,
         line,
       };
@@ -338,6 +514,19 @@ function formatFinding(finding, index) {
   return lines.join('\n');
 }
 
+function formatSuggestion(suggestion, index) {
+  const id = stableSuggestionId(suggestion.id, `suggestions[${index}].id`);
+  const title = visibleText(nonEmptyString(suggestion.title, `suggestions[${index}].title`));
+  const lines = [
+    `### ${id} · ${title}`,
+    '',
+    `- Improvement: ${visibleText(suggestion.improvement)}`,
+    `- Benefit: ${visibleText(suggestion.benefit)}`,
+    ...formatEvidence(suggestion.evidence),
+  ];
+  return lines.join('\n');
+}
+
 function formatLedgerEntry(entry) {
   if (typeof entry === 'string') return `- ${visibleText(entry)}`;
   if (!plainObject(entry)) return null;
@@ -365,7 +554,7 @@ function stringItems(value, label) {
 
 export function buildReviewBody(report) {
   const normalized = validateNormalizedReport(report);
-  const { findings } = normalized;
+  const { findings, suggestions } = normalized;
   const headSha = normalized.headSha;
   const validation = stringItems(normalized.validation, 'report.validation');
   const deferred = stringItems(normalized.deferred, 'report.deferred');
@@ -394,6 +583,14 @@ export function buildReviewBody(report) {
     });
   }
 
+  if (suggestions.length > 0) {
+    lines.push('', '## Non-blocking suggestions', '');
+    suggestions.forEach((suggestion, index) => {
+      if (index > 0) lines.push('');
+      lines.push(formatSuggestion(suggestion, index));
+    });
+  }
+
   const priorFeedback = normalized.priorFeedback.map(formatLedgerEntry).filter(Boolean);
   if (priorFeedback.length > 0) {
     lines.push('', '## Prior feedback', '', ...priorFeedback);
@@ -413,7 +610,9 @@ export function buildReviewBody(report) {
     `- System blast radius: ${coverage.blastRadius}`,
     `- Feature truth and adjacent regressions: ${coverage.featureTruth}`,
     '',
-    `<!-- blast-radius-buddy-review:${escapeMetadataJson(metadataFor(headSha, findings))} -->`,
+    `<!-- blast-radius-buddy-review:${escapeMetadataJson(
+      metadataFor(headSha, findings, suggestions),
+    )} -->`,
   );
   return lines.join('\n');
 }
@@ -570,7 +769,20 @@ function validAnchor(evidence, changedLines) {
   return changedLines.get(evidence.path)?.has(evidence.line) === true;
 }
 
-function inlineBody(finding, anchor) {
+function appendMechanicalSuggestion(lines, item, anchor) {
+  const sameFile = Array.isArray(item.evidence)
+    && item.evidence.length > 0
+    && item.evidence.every((evidence) => plainObject(evidence) && evidence.path === anchor.path);
+  const suggestedChange = typeof item.suggestedChange === 'string'
+    ? item.suggestedChange
+    : '';
+  if (item.mechanical !== true || !sameFile || suggestedChange.trim().length === 0) return;
+  const visibleSuggestion = visibleText(suggestedChange);
+  const closingLineBreak = visibleSuggestion.endsWith('\n') ? '' : '\n';
+  lines.push('', `\`\`\`suggestion\n${visibleSuggestion}${closingLineBreak}\`\`\``);
+}
+
+function inlineFindingBody(finding, anchor) {
   const id = stableFindingId(finding.id);
   const linkage = findingReviewLinkage(finding);
   const title = visibleText(nonEmptyString(finding.title, `${id}.title`));
@@ -593,56 +805,128 @@ function inlineBody(finding, anchor) {
   if (typeof finding.suggestedFix === 'string' && finding.suggestedFix.trim().length > 0) {
     lines.push('', `Suggested fix: ${visibleText(finding.suggestedFix.trim())}`);
   }
-
-  const sameFile = Array.isArray(finding.evidence)
-    && finding.evidence.length > 0
-    && finding.evidence.every((item) => plainObject(item) && item.path === anchor.path);
-  const suggestedChange = typeof finding.suggestedChange === 'string'
-    ? finding.suggestedChange
-    : '';
-  if (finding.mechanical === true && sameFile && suggestedChange.trim().length > 0) {
-    const visibleSuggestion = visibleText(suggestedChange);
-    const closingLineBreak = visibleSuggestion.endsWith('\n') ? '' : '\n';
-    lines.push('', `\`\`\`suggestion\n${visibleSuggestion}${closingLineBreak}\`\`\``);
-  }
+  appendMechanicalSuggestion(lines, finding, anchor);
   lines.push('', `<!-- blast-radius-buddy-finding:${id}:${linkage} -->`);
   return lines.join('\n');
 }
 
-export function partitionInlineFindings(findings, changedLines) {
-  if (!Array.isArray(findings)) throw new TypeError('findings must be an array');
+function inlineSuggestionBody(suggestion, anchor) {
+  const id = stableSuggestionId(suggestion.id);
+  const linkage = suggestionReviewLinkage(suggestion);
+  const title = visibleText(nonEmptyString(suggestion.title, `${id}.title`));
+  const lines = [`**${id} · Non-blocking suggestion · ${title}**`];
+  for (const [label, field] of [
+    ['Improvement', 'improvement'],
+    ['Benefit', 'benefit'],
+  ]) {
+    if (typeof suggestion[field] === 'string' && suggestion[field].trim().length > 0) {
+      lines.push('', `${label}: ${visibleText(suggestion[field].trim())}`);
+    }
+  }
+  const behavior = typeof anchor.behavior === 'string' && anchor.behavior.trim().length > 0
+    ? ` — ${visibleText(anchor.behavior.trim())}`
+    : '';
+  lines.push('', `Evidence: \`${visibleText(anchor.path)}:${anchor.line}\`${behavior}`);
+  appendMechanicalSuggestion(lines, suggestion, anchor);
+  lines.push('', `<!-- blast-radius-buddy-suggestion:${id}:${linkage} -->`);
+  return lines.join('\n');
+}
+
+function partitionInlineItems(items, changedLines, { label, validateId, renderBody }) {
+  if (!Array.isArray(items)) throw new TypeError(`${label} must be an array`);
   if (!(changedLines instanceof Map)) throw new TypeError('changedLines must be a Map');
   const inline = [];
   const bodyOnly = [];
 
-  findings.forEach((finding, index) => {
-    if (!plainObject(finding)) throw new TypeError(`findings[${index}] must be an object`);
-    stableFindingId(finding.id, `findings[${index}].id`);
-    const anchor = Array.isArray(finding.evidence)
-      ? finding.evidence.find((evidence) => validAnchor(evidence, changedLines))
+  items.forEach((item, index) => {
+    if (!plainObject(item)) throw new TypeError(`${label}[${index}] must be an object`);
+    validateId(item.id, `${label}[${index}].id`);
+    const anchor = Array.isArray(item.evidence)
+      ? item.evidence.find((evidence) => validAnchor(evidence, changedLines))
       : undefined;
     if (!anchor) {
-      bodyOnly.push(finding);
+      bodyOnly.push(item);
       return;
     }
     inline.push({
       path: anchor.path,
       line: anchor.line,
-      body: inlineBody(finding, anchor),
+      body: renderBody(item, anchor),
     });
   });
   return { inline, bodyOnly };
 }
 
-export function prepareReview(report, diff, gates) {
+export function partitionInlineFindings(findings, changedLines) {
+  return partitionInlineItems(findings, changedLines, {
+    label: 'findings',
+    validateId: stableFindingId,
+    renderBody: inlineFindingBody,
+  });
+}
+
+function partitionInlineSuggestions(suggestions, changedLines) {
+  return partitionInlineItems(suggestions, changedLines, {
+    label: 'suggestions',
+    validateId: stableSuggestionId,
+    renderBody: inlineSuggestionBody,
+  });
+}
+
+export function prepareReview(report, diff, gates, verification) {
   const normalized = validateNormalizedReport(report);
-  const event = decideReviewEvent(gates);
+  const normalizedVerification = validateVerificationArtifact(verification);
   const reportIds = normalized.findings.map(({ id }) => id).toSorted();
+  if (!Array.isArray(gates?.findings) || !Array.isArray(gates?.suggestions)) {
+    decideReviewEvent(gates);
+  }
   const gateIds = gates.findings.map((finding, index) => (
-    stableFindingId(finding.id, `gates.findings[${index}].id`)
+    stableFindingId(finding?.id, `gates.findings[${index}].id`)
   )).toSorted();
   if (JSON.stringify(reportIds) !== JSON.stringify(gateIds)) {
     throw new TypeError('report findings must match gate findings');
+  }
+  const reportSuggestionIds = normalized.suggestions.map(({ id }) => id).toSorted();
+  const gateSuggestionIds = gates.suggestions.map((suggestion, index) => (
+    stableSuggestionId(suggestion?.id, `gates.suggestions[${index}].id`)
+  )).toSorted();
+  if (JSON.stringify(reportSuggestionIds) !== JSON.stringify(gateSuggestionIds)) {
+    throw new TypeError('report suggestions must match gate suggestions');
+  }
+  const event = decideReviewEvent(gates);
+  if (gates.verifierVerdict !== normalizedVerification.result.verdict) {
+    throw new TypeError('Gate verifier verdict must match verification artifact verdict');
+  }
+  const effectsBySuggestionId = new Map(
+    normalizedVerification.result.challenges
+      .filter(({ target }) => SUGGESTION_ID_PATTERN.test(target))
+      .map(({ target, reportEffect }) => [target, reportEffect]),
+  );
+  const survivingSnapshots = normalizedVerification.suggestions.filter(
+    ({ id }) => effectsBySuggestionId.get(id) === 'none',
+  );
+  const snapshotsById = new Map(survivingSnapshots.map((suggestion) => [suggestion.id, suggestion]));
+  if (normalized.suggestions.length !== survivingSnapshots.length
+    || normalized.suggestions.some(({ id }) => !snapshotsById.has(id))) {
+    throw new TypeError('Report suggestions must match verification survivors');
+  }
+  for (const suggestion of normalized.suggestions) {
+    if (JSON.stringify(suggestion) !== JSON.stringify(snapshotsById.get(suggestion.id))) {
+      throw new TypeError(
+        `Report suggestion ${suggestion.id} content must match verification snapshot`,
+      );
+    }
+  }
+  const reportFindingsById = new Map(normalized.findings.map((finding) => [finding.id, finding]));
+  for (const { finding } of normalizedVerification.promotions) {
+    if (JSON.stringify(finding) !== JSON.stringify(reportFindingsById.get(finding.id))) {
+      throw new TypeError(
+        `Promoted finding ${finding.id} must exactly match one report finding`,
+      );
+    }
+  }
+  if (normalizedVerification.promotions.length > 0 && event !== 'COMMENT') {
+    throw new TypeError('An actionable suggestion promotion requires COMMENT');
   }
   if ((event === 'APPROVE') !== (normalized.verdict === 'Approve')) {
     throw new TypeError(`Report verdict ${normalized.verdict} contradicts gate event ${event}`);
@@ -652,9 +936,20 @@ export function prepareReview(report, diff, gates) {
     throw new TypeError('Uncertainty report requires the material uncertainty gate');
   }
   const body = buildReviewBody(normalized);
-  const findings = normalized.findings;
   const changedLines = collectChangedLines(diff);
-  const { inline: comments } = partitionInlineFindings(findings, changedLines);
+  const { inline: findingComments } = partitionInlineFindings(normalized.findings, changedLines);
+  const {
+    inline: suggestionComments,
+    bodyOnly: unanchoredSuggestions,
+  } = partitionInlineSuggestions(normalized.suggestions, changedLines);
+  if (unanchoredSuggestions.length > 0) {
+    const id = unanchoredSuggestions[0].id;
+    const index = normalized.suggestions.findIndex((suggestion) => suggestion.id === id);
+    throw new TypeError(
+      `report.suggestions[${index}] must cite a PR-relative new-side changed line`,
+    );
+  }
+  const comments = [...findingComments, ...suggestionComments];
   return { body, comments, event, headSha: normalized.headSha };
 }
 
@@ -663,8 +958,8 @@ function validateComment(comment, index) {
   const path = repositoryPath(comment.path, `comments[${index}].path`);
   const line = positiveSafeIntegerValue(comment.line, `comments[${index}].line`);
   const body = nonEmptyString(comment.body, `comments[${index}].body`);
-  if (!FINDING_MARKER_PATTERN.test(body)) {
-    throw new TypeError(`comments[${index}].body must end with a stable finding marker`);
+  if (!FINDING_MARKER_PATTERN.test(body) && !SUGGESTION_MARKER_PATTERN.test(body)) {
+    throw new TypeError(`comments[${index}].body must end with a stable review marker`);
   }
   return { path, line, side: 'RIGHT', body };
 }
@@ -681,6 +976,7 @@ function validateSubmission(options) {
     report,
     diff,
     gates,
+    verification,
     body,
     comments,
     execute,
@@ -692,7 +988,7 @@ function validateSubmission(options) {
   const validatedBody = nonEmptyString(body, 'body');
   if (!Array.isArray(comments)) throw new TypeError('comments must be an array');
   if (typeof execute !== 'function') throw new TypeError('execute must be a function');
-  const recomputed = prepareReview(report, diff, gates);
+  const recomputed = prepareReview(report, diff, gates, verification);
   if (validatedBody !== recomputed.body
     || JSON.stringify(comments) !== JSON.stringify(recomputed.comments)) {
     throw new TypeError('Prepared review body or comments do not match source artifacts');
@@ -764,9 +1060,9 @@ export async function submitReview(options) {
 function usage() {
   return [
     'Usage:',
-    '  github-review.mjs prepare --report-file REPORT.json --diff-file PR.diff --gates-file GATES.json --body-output BODY.md --comments-output COMMENTS.json',
+    '  github-review.mjs prepare --report-file REPORT.json --diff-file PR.diff --gates-file GATES.json --verification-file VERIFICATION.json --body-output BODY.md --comments-output COMMENTS.json',
     '  github-review.mjs render --report-file REPORT.json --output BODY.md',
-    '  github-review.mjs submit --repo OWNER/REPO --pr NUMBER --report-file REPORT.json --diff-file PR.diff --gates-file GATES.json --body-file BODY.md --comments-file COMMENTS.json',
+    '  github-review.mjs submit --repo OWNER/REPO --pr NUMBER --report-file REPORT.json --diff-file PR.diff --gates-file GATES.json --verification-file VERIFICATION.json --body-file BODY.md --comments-file COMMENTS.json',
   ].join('\n');
 }
 
@@ -811,23 +1107,26 @@ export async function main(args, dependencies = {}) {
     const options = readOptions(
       rest,
       new Set([
-        'report-file', 'diff-file', 'gates-file',
+        'report-file', 'diff-file', 'gates-file', 'verification-file',
         'body-output', 'comments-output',
       ]),
     );
     const reportFile = resolve(requireOption(options, 'report-file'));
     const diffFile = resolve(requireOption(options, 'diff-file'));
     const gatesFile = resolve(requireOption(options, 'gates-file'));
+    const verificationFile = resolve(requireOption(options, 'verification-file'));
     const bodyOutput = resolve(requireOption(options, 'body-output'));
     const commentsOutput = resolve(requireOption(options, 'comments-output'));
-    const [reportText, diff, gatesText] = await Promise.all([
+    const [reportText, diff, gatesText, verificationText] = await Promise.all([
       readFile(reportFile, 'utf8'),
       readFile(diffFile, 'utf8'),
       readFile(gatesFile, 'utf8'),
+      readFile(verificationFile, 'utf8'),
     ]);
     const report = parseJsonFile(reportText, reportFile);
     const gates = parseJsonFile(gatesText, gatesFile);
-    const result = prepareReview(report, diff, gates);
+    const verification = parseJsonFile(verificationText, verificationFile);
+    const result = prepareReview(report, diff, gates, verification);
     await writeFile(bodyOutput, result.body, 'utf8');
     await writeFile(commentsOutput, `${JSON.stringify(result.comments)}\n`, 'utf8');
     return result;
@@ -846,23 +1145,27 @@ export async function main(args, dependencies = {}) {
     const options = readOptions(
       rest,
       new Set([
-        'repo', 'pr', 'report-file', 'diff-file', 'gates-file', 'body-file', 'comments-file',
+        'repo', 'pr', 'report-file', 'diff-file', 'gates-file', 'verification-file',
+        'body-file', 'comments-file',
       ]),
     );
     const reportFile = resolve(requireOption(options, 'report-file'));
     const diffFile = resolve(requireOption(options, 'diff-file'));
     const gatesFile = resolve(requireOption(options, 'gates-file'));
+    const verificationFile = resolve(requireOption(options, 'verification-file'));
     const bodyFile = resolve(requireOption(options, 'body-file'));
     const commentsFile = resolve(requireOption(options, 'comments-file'));
-    const [reportText, diff, gatesText, body, commentsText] = await Promise.all([
+    const [reportText, diff, gatesText, verificationText, body, commentsText] = await Promise.all([
       readFile(reportFile, 'utf8'),
       readFile(diffFile, 'utf8'),
       readFile(gatesFile, 'utf8'),
+      readFile(verificationFile, 'utf8'),
       readFile(bodyFile, 'utf8'),
       readFile(commentsFile, 'utf8'),
     ]);
     const report = parseJsonFile(reportText, reportFile);
     const gates = parseJsonFile(gatesText, gatesFile);
+    const verification = parseJsonFile(verificationText, verificationFile);
     const comments = parseJsonFile(commentsText, commentsFile);
     const result = await submitReview({
       repo: requireOption(options, 'repo'),
@@ -870,6 +1173,7 @@ export async function main(args, dependencies = {}) {
       report,
       diff,
       gates,
+      verification,
       body,
       comments,
       execute,

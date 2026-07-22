@@ -15,8 +15,9 @@ import {
 } from '../skills/blast-radius-buddy/scripts/reviewer-runner.mjs';
 import { parseProtocolBlock } from '../skills/blast-radius-buddy/scripts/review-protocol.mjs';
 
-const COMPLETE_REVIEW = '```brb-review\n{"status":"complete","findings":[]}\n```';
+const COMPLETE_REVIEW = '```brb-review\n{"status":"complete","findings":[],"suggestions":[]}\n```';
 const COMPLETE_REPRODUCTION = '```brb-reproduction\n{"results":[{"id":"BRB001","verdict":"confirmed","severity":"high","evidence":"proof","reason":"confirmed","reportEffect":"actionable"}]}\n```';
+const COMPLETE_VERIFICATION = '```brb-verification\n{"verdict":"clean","challenges":[{"target":"BRS001","evidence":"proof","reason":"keep","reportEffect":"none"}]}\n```';
 const FEATURE_ANGLE = 'feature-truth-and-adjacent-regressions';
 const REVIEW_PREFIX = join(tmpdir(), 'blast-radius-buddy-review-');
 
@@ -91,7 +92,7 @@ test('runReviewer retries once in a different neutral directory', async () => {
     validate: (output) => parseProtocolBlock(output, 'brb-review'),
   });
 
-  assert.deepEqual(result, { status: 'complete', findings: [] });
+  assert.deepEqual(result, { status: 'complete', findings: [], suggestions: [] });
   assert.equal(calls.length, 2);
   assert.equal(new Set(calls.map(({ cwd }) => cwd)).size, 2);
   for (const call of calls) {
@@ -138,7 +139,7 @@ test('runReviewer retries a non-string malformed response once', async () => {
     validate: (output) => parseProtocolBlock(output, 'brb-review'),
   });
 
-  assert.deepEqual(result, { status: 'complete', findings: [] });
+  assert.deepEqual(result, { status: 'complete', findings: [], suggestions: [] });
   assert.equal(attempts, 2);
 });
 
@@ -247,7 +248,7 @@ test('timeout waits for TERM, KILL, and child close before cleanup and retry', a
     firstChild.close(null, 'SIGKILL');
     assert.deepEqual(
       await resultPromise,
-      { status: 'complete', findings: [] },
+      { status: 'complete', findings: [], suggestions: [] },
     );
     assert.deepEqual(events, [
       'spawn:1', 'first:SIGTERM', 'first:SIGKILL',
@@ -773,7 +774,7 @@ test('run-claude CLI retries once and writes only normalized validated JSON', as
   assert.equal(launches, 2);
   assert.deepEqual(writes, [[
     './review.json',
-    '{"status":"complete","findings":[]}\n',
+    '{"status":"complete","findings":[],"suggestions":[]}\n',
     'utf8',
   ]]);
 });
@@ -882,4 +883,104 @@ test('run-claude reproduction validates expected IDs before launching', async ()
     );
     assert.equal(launches, 0);
   }
+});
+
+test('run-claude verification binds output to the complete expected BRS ID file', async () => {
+  const writes = [];
+  let launches = 0;
+
+  await main(
+    [
+      'run-claude',
+      '--prompt-file', './verification-prompt.md',
+      '--protocol', 'brb-verification',
+      '--expected-ids-file', './expected-ids.json',
+      '--timeout-ms', '25',
+      '--output', './verification.json',
+    ],
+    {
+      readFile: async (path) => {
+        if (path === './expected-ids.json') return '["BRS001"]';
+        if (path === './verification-prompt.md') return 'bounded verification packet';
+        throw new Error(`unexpected read: ${path}`);
+      },
+      launch: async () => {
+        launches += 1;
+        return COMPLETE_VERIFICATION;
+      },
+      writeFile: async (...args) => writes.push(args),
+    },
+  );
+
+  assert.equal(launches, 1);
+  assert.deepEqual(writes, [[
+    './verification.json',
+    '{"verdict":"clean","challenges":[{"target":"BRS001","evidence":"proof","reason":"keep","reportEffect":"none"}]}\n',
+    'utf8',
+  ]]);
+});
+
+test('run-claude verification requires a valid expected BRS ID file but allows empty', async () => {
+  const cases = [
+    { args: [], contents: undefined, error: /--expected-ids-file is required/ },
+    {
+      args: ['--expected-ids-file', './ids.json'],
+      contents: '["BRS001","BRS001"]',
+      error: /unique/i,
+    },
+    {
+      args: ['--expected-ids-file', './ids.json'],
+      contents: '["BRS001","BRS002","BRS003","BRS004"]',
+      error: /at most 3/i,
+    },
+    {
+      args: ['--expected-ids-file', './ids.json'],
+      contents: '["BRB001"]',
+      error: /stable suggestion ID/i,
+    },
+  ];
+
+  for (const { args, contents, error } of cases) {
+    let launches = 0;
+    await assert.rejects(
+      main(
+        [
+          'run-claude',
+          '--prompt-file', './prompt.md',
+          '--protocol', 'brb-verification',
+          ...args,
+          '--timeout-ms', '25',
+          '--output', './verification.json',
+        ],
+        {
+          readFile: async (path) => path === './ids.json' ? contents : 'bounded packet',
+          launch: async () => {
+            launches += 1;
+            return '```brb-verification\n{"verdict":"clean","challenges":[]}\n```';
+          },
+          writeFile: async () => {},
+        },
+      ),
+      error,
+    );
+    assert.equal(launches, 0);
+  }
+
+  let launches = 0;
+  await main([
+    'run-claude',
+    '--prompt-file', './prompt.md',
+    '--protocol', 'brb-verification',
+    '--expected-ids-file', './ids.json',
+    '--timeout-ms', '25',
+    '--output', './verification.json',
+  ], {
+    readFile: async (path) => path === './ids.json' ? '[]' : 'bounded packet',
+    launch: async () => {
+      launches += 1;
+      return '```brb-verification\n{"verdict":"clean","challenges":[]}\n```';
+    },
+    writeFile: async () => {},
+  });
+  assert.equal(launches, 1);
 });
