@@ -30,7 +30,7 @@ Blast Radius Buddy expects:
 - `gh` installed and authenticated for the target GitHub repository; and
 - an isolated reviewer that can run fresh contexts without target-repository access or tools.
 
-Manual invocation authorizes one marker comment and one final native review. It does not authorize code edits, pushes, `REQUEST_CHANGES`, thread resolution, or merges.
+Manual invocation authorizes one marker comment and one final native review. It does not authorize code edits, commits, pushes, `REQUEST_CHANGES`, thread resolution, or merges.
 
 ## Quality bar
 

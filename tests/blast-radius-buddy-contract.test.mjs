@@ -23,13 +23,14 @@ test('documents the native high-signal PR review contract', async () => {
   assert.match(skill, /one fresh-eyes/i);
   assert.match(skill, /APPROVE/);
   assert.match(skill, /never.*REQUEST_CHANGES/is);
-  assert.match(skill, /does not add tests, edit production code, commit, or push/i);
+  assert.match(skill, /Do not add tests, edit production code, apply fixes, commit, or push/i);
   assert.match(report, /careful shake/);
   assert.match(report, /here's what held and what came loose/);
   assert.match(validation, /confirmed.*narrowed.*downgraded.*unclear.*refuted/is);
   assert.doesNotMatch(skill, /repair loop/i);
   assert.ok(skill.trim().split(/\s+/).length < 700, 'SKILL.md must stay below 700 words');
   assert.doesNotMatch(readme, /accepted findings[^.\n]*fix/i);
+  assert.match(readme, /does not authorize code edits, commits, pushes/i);
 });
 
 test('ships every deterministic PR review helper', async () => {
