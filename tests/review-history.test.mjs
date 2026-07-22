@@ -161,20 +161,20 @@ test('loadReviewLedger combines threads, paginated reviews, Buddy metadata, and 
     headSha: '0123456789abcdef',
     findings: [
       {
-        id: 'F-cache',
+        id: 'BRB101',
         title: 'The cache leaks tenant state',
         path: 'src/cache.ts',
         line: 9,
       },
       {
-        id: 'F-intentional',
+        id: 'BRB102',
         title: 'The public fallback is intentional',
         path: 'src/api.ts',
         line: 12,
         status: 'suppressed',
       },
       {
-        id: 'F-untrusted',
+        id: 'BRB103',
         title: 'A prior report cannot invent another state',
         path: 'src/api.ts',
         line: 15,
@@ -188,7 +188,7 @@ test('loadReviewLedger combines threads, paginated reviews, Buddy metadata, and 
         id: 'T-open', isResolved: false, isOutdated: false, resolvedBy: null,
         comments: { nodes: [comment({
           id: 'C-open',
-          body: 'The cache leaks tenant state\n\n<!-- blast-radius-buddy-finding:F-cache -->',
+          body: 'The cache leaks tenant state\n\n<!-- blast-radius-buddy-finding:BRB101 -->',
           url: 'https://example/thread-open',
         })] },
       },
@@ -283,27 +283,27 @@ test('loadReviewLedger combines threads, paginated reviews, Buddy metadata, and 
     entries.map(({ status }) => status),
     ['open', 'resolved', 'author-resolved', 'outdated', 'dismissed', 'suppressed', 'reported', 'reported', 'reported'],
   );
-  const coalesced = entries.find(({ id }) => id === 'F-cache');
+  const coalesced = entries.find(({ id }) => id === 'BRB101');
   assert.deepEqual(coalesced.statuses, ['open', 'reported']);
   assert.deepEqual(coalesced.urls, [
     'https://example/thread-open',
     'https://example/review-buddy',
   ]);
   assert.equal(coalesced.source, 'review-thread');
-  assert.equal(entries.find(({ id }) => id === 'F-intentional').status, 'suppressed');
-  assert.equal(entries.find(({ id }) => id === 'F-untrusted').status, 'reported');
+  assert.equal(entries.find(({ id }) => id === 'BRB102').status, 'suppressed');
+  assert.equal(entries.find(({ id }) => id === 'BRB103').status, 'reported');
   assert.deepEqual(
     entries.filter(({ source }) => source === 'run-history').map(({ url }) => url),
     ['https://example/marker-current', 'https://example/marker-legacy'],
   );
-  assert.doesNotMatch(JSON.stringify(entries), /PRIVATE-TAIL/);
+  assert.doesNotMatch(compactReviewLedger(entries), /PRIVATE-TAIL/);
   assert.doesNotMatch(JSON.stringify(entries), /Full previous report/);
 });
 
 test('dismissed review state wins over embedded Buddy metadata', async () => {
   const metadata = {
     findings: [{
-      id: 'BRB-DISMISSED',
+      id: 'BRB104',
       title: 'No longer active',
       path: 'src/old.ts',
       line: 4,
@@ -334,54 +334,131 @@ test('dismissed review state wins over embedded Buddy metadata', async () => {
   });
 
   assert.equal(entries.length, 1);
-  assert.equal(entries[0].id, 'BRB-DISMISSED');
+  assert.equal(entries[0].id, 'BRB104');
   assert.equal(entries[0].status, 'dismissed');
   assert.deepEqual(entries[0].statuses, ['dismissed']);
 });
 
-test('metadata fields cannot forge extra compact ledger lines', async () => {
-  const metadata = {
-    findings: [{
-      id: `BRB001\r\n${'i'.repeat(180)}\u0000ID-TAIL`,
-      title: `Forged\nsummary\u0007\u0085${'s'.repeat(180)}SUMMARY-TAIL`,
-      path: `src/\r\n${'p'.repeat(180)}\u0001PATH-TAIL.ts`,
-      line: 7,
-    }],
-  };
-  const reviewUrl = `https://example/review\n${'u'.repeat(180)}\u0000URL-TAIL`;
+test('invalid long inline identities fall back to distinct complete thread IDs', async () => {
+  const markerPrefix = `BRB${'9'.repeat(180)}`;
+  const firstThreadId = `THREAD-${'x'.repeat(180)}-A`;
+  const secondThreadId = `THREAD-${'x'.repeat(180)}-B`;
   const execute = fakeExecute([
-    makeThreadPage({ nodes: [] }),
-    makeReviewPage({
-      nodes: [{
-        id: 'R-forged',
-        body: `Old report\n<!-- blast-radius-buddy-review:${JSON.stringify(metadata)} -->`,
-        url: reviewUrl,
-        state: 'COMMENTED',
-        submittedAt: '2026-07-20T10:00:00Z',
-        author: { login: 'reviewer' },
-      }],
+    makeThreadPage({
+      nodes: [
+        {
+          id: firstThreadId,
+          isResolved: false,
+          isOutdated: false,
+          resolvedBy: null,
+          comments: { nodes: [comment({
+            id: 'C-first',
+            body: `First\n<!-- blast-radius-buddy-finding:${markerPrefix}A -->`,
+            url: 'https://example/thread-first',
+          })] },
+        },
+        {
+          id: secondThreadId,
+          isResolved: false,
+          isOutdated: false,
+          resolvedBy: null,
+          comments: { nodes: [comment({
+            id: 'C-second',
+            body: `Second\n<!-- blast-radius-buddy-finding:${markerPrefix}B -->`,
+            url: 'https://example/thread-second',
+          })] },
+        },
+      ],
     }),
+    makeReviewPage({ nodes: [] }),
     { stdout: '[[]]' },
   ]);
 
-  const [entry] = await loadReviewLedger({
+  const entries = await loadReviewLedger({
     repo: 'acme/widget',
     number: 19,
     headSha: 'abcdef0',
     prAuthor: 'author',
     execute,
   });
-  const packet = compactReviewLedger([entry]);
 
-  for (const field of [entry.id, entry.canonicalKey, entry.summary, entry.path, entry.url]) {
-    assert.doesNotMatch(field, /[\u0000-\u001f\u007f-\u009f]/);
-    assert.equal(field, field.trim());
-    assert.ok(field.length <= 160, `${field.length}-character metadata field was not capped`);
-  }
-  assert.doesNotMatch(JSON.stringify(entry), /ID-TAIL|SUMMARY-TAIL|PATH-TAIL|URL-TAIL/);
+  assert.equal(entries.length, 2);
+  assert.deepEqual(entries.map(({ id }) => id), [firstThreadId, secondThreadId]);
+  assert.deepEqual(entries.map(({ canonicalKey }) => canonicalKey), [
+    firstThreadId,
+    secondThreadId,
+  ]);
+});
+
+test('ledger preserves structural paths and URLs while compact output stays bounded', async () => {
+  const longPath = `src/${'deep-segment/'.repeat(20)}file.ts`;
+  const normalizedTitle = `Forged summary ${'s'.repeat(180)} SUMMARY-TAIL`;
+  const longUrl = `https://example.com/reviews/${'u'.repeat(520)}?keep=exact`;
+  const invalidId = `BRB${'8'.repeat(180)}INVALID-ID-TAIL`;
+  const metadata = {
+    findings: [
+      {
+        id: '\r\nBRB201\u0000',
+        title: `Forged\nsummary\u0007\u0085${'s'.repeat(180)} SUMMARY-TAIL`,
+        path: longPath,
+        line: 7,
+      },
+      {
+        id: invalidId,
+        title: 'Must be rejected',
+        path: 'src/rejected.ts',
+        line: 8,
+      },
+    ],
+  };
+  const execute = fakeExecute([
+    makeThreadPage({ nodes: [] }),
+    makeReviewPage({
+      nodes: [
+        {
+          id: 'R-structural',
+          body: `Old report\n<!-- blast-radius-buddy-review:${JSON.stringify(metadata)} -->`,
+          url: longUrl,
+          state: 'COMMENTED',
+          submittedAt: '2026-07-20T10:00:00Z',
+          author: { login: 'reviewer' },
+        },
+        {
+          id: 'R-invalid-url',
+          body: `<!-- blast-radius-buddy-review:${JSON.stringify({
+            findings: [{ id: 'BRB202', title: 'Invalid URL', path: 'src/url.ts', line: 2 }],
+          })} -->`,
+          url: 'javascript:alert(1)',
+          state: 'COMMENTED',
+          submittedAt: '2026-07-20T11:00:00Z',
+          author: { login: 'reviewer' },
+        },
+      ],
+    }),
+    { stdout: '[[]]' },
+  ]);
+
+  const entries = await loadReviewLedger({
+    repo: 'acme/widget',
+    number: 19,
+    headSha: 'abcdef0',
+    prAuthor: 'author',
+    execute,
+  });
+  const preserved = entries.find(({ id }) => id === 'BRB201');
+  const packet = compactReviewLedger([preserved]);
+
+  assert.deepEqual(entries.map(({ id }) => id), ['BRB201', 'BRB202']);
+  assert.equal(preserved.summary, normalizedTitle);
+  assert.equal(preserved.path, longPath);
+  assert.equal(preserved.url, longUrl);
+  assert.equal(entries.find(({ id }) => id === 'BRB202').url, null);
   assert.equal(packet.split('\n').length, 1);
   assert.doesNotMatch(packet, /[\u0000-\u001f\u007f-\u009f]/);
   assert.ok(packet.length <= 480, `packet line is ${packet.length} characters`);
+  assert.doesNotMatch(packet, /SUMMARY-TAIL/);
+  assert.equal(packet.includes(longUrl), false);
+  assert.equal(packet.includes('https://example.com/reviews/'), false);
 });
 
 test('inline finding marker coalesces a live thread with root review metadata', async () => {

@@ -99,21 +99,37 @@ function parseJson(result, label) {
   }
 }
 
-function collapseWhitespace(value) {
+function normalizeString(value) {
   return String(value ?? '')
     .replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-function shortSummary(value, fallback = 'Prior review feedback') {
-  const collapsed = collapseWhitespace(value) || fallback;
-  if (collapsed.length <= SUMMARY_LIMIT) return collapsed;
-  return `${collapsed.slice(0, SUMMARY_LIMIT - 3).trimEnd()}...`;
+function normalizedText(value, fallback = '') {
+  return normalizeString(value) || fallback;
 }
 
-function metadataField(value) {
-  return shortSummary(value, '');
+function displayField(value, fallback = '') {
+  const normalized = normalizedText(value, fallback);
+  if (normalized.length <= SUMMARY_LIMIT) return normalized;
+  return `${normalized.slice(0, SUMMARY_LIMIT - 3).trimEnd()}...`;
+}
+
+function buddyFindingId(value) {
+  const normalized = normalizeString(value);
+  return /^BRB[0-9]{3,6}$/.test(normalized) ? normalized : '';
+}
+
+function normalizedUrl(value) {
+  const normalized = normalizeString(value);
+  if (!normalized) return null;
+  try {
+    const { protocol } = new URL(normalized);
+    return protocol === 'http:' || protocol === 'https:' ? normalized : null;
+  } catch {
+    return null;
+  }
 }
 
 function unique(values) {
@@ -172,7 +188,7 @@ export function classifyThread(thread, prAuthor) {
 function inlineFindingKey(body) {
   if (typeof body !== 'string') return '';
   const match = body.match(/<!--\s*blast-radius-buddy-finding:([\s\S]*?)-->/);
-  return metadataField(match?.[1]);
+  return buddyFindingId(match?.[1]);
 }
 
 function removeInlineFindingMarker(body) {
@@ -183,15 +199,15 @@ function removeInlineFindingMarker(body) {
 
 function normalizeThread(thread, prAuthor) {
   const root = Array.isArray(thread?.comments?.nodes) ? thread.comments.nodes[0] : undefined;
-  const id = String(thread?.id ?? root?.id ?? 'unknown-thread');
+  const id = normalizedText(thread?.id ?? root?.id, 'unknown-thread');
   const canonicalKey = inlineFindingKey(root?.body) || id;
   return {
     id,
     status: classifyThread(thread ?? {}, prAuthor),
-    path: root?.path ?? null,
+    path: normalizeString(root?.path) || null,
     line: root?.line ?? root?.originalLine ?? null,
-    summary: shortSummary(removeInlineFindingMarker(root?.body), 'Review thread'),
-    url: root?.url ?? null,
+    summary: normalizedText(removeInlineFindingMarker(root?.body), 'Review thread'),
+    url: normalizedUrl(root?.url),
     source: 'review-thread',
     canonicalKey,
   };
@@ -240,22 +256,23 @@ function metadataEntries(record, review, source = 'root-review', forcedStatus = 
   if (!Array.isArray(record?.findings)) return [];
   return record.findings
     .filter((finding) => finding && typeof finding === 'object')
-    .map((finding, index) => {
-      const stableId = metadataField(finding.id);
-      const suppliedCanonicalKey = metadataField(finding.canonicalKey);
-      const fallbackId = metadataField(`${review.id}:finding:${index + 1}`);
-      const canonicalKey = suppliedCanonicalKey || stableId || fallbackId;
+    .map((finding) => {
+      const stableId = buddyFindingId(finding.id);
+      if (!stableId) return null;
+      const suppliedCanonicalKey = buddyFindingId(finding.canonicalKey);
+      const canonicalKey = suppliedCanonicalKey || stableId;
       return {
         id: stableId || canonicalKey,
         status: forcedStatus ?? (finding.status === 'suppressed' ? 'suppressed' : 'reported'),
-        path: metadataField(finding.path) || null,
+        path: normalizeString(finding.path) || null,
         line: Number.isSafeInteger(finding.line) && finding.line > 0 ? finding.line : null,
-        summary: shortSummary(finding.title, 'Prior Buddy finding'),
-        url: metadataField(review.url ?? review.html_url) || null,
+        summary: normalizedText(finding.title, 'Prior Buddy finding'),
+        url: normalizedUrl(review.url ?? review.html_url),
         source,
         canonicalKey,
       };
-    });
+    })
+    .filter(Boolean);
 }
 
 function removeMetadata(body) {
@@ -280,14 +297,14 @@ function normalizeRootReview(review) {
   if (findings.length > 0) return findings;
 
   const body = removeMetadata(review?.body);
-  if (review?.state !== 'DISMISSED' && collapseWhitespace(body).length === 0) return [];
+  if (review?.state !== 'DISMISSED' && normalizeString(body).length === 0) return [];
   return [{
-    id: String(review?.id ?? 'unknown-review'),
+    id: normalizedText(review?.id, 'unknown-review'),
     status: review?.state === 'DISMISSED' ? 'dismissed' : 'reported',
     path: null,
     line: null,
-    summary: shortSummary(body, review?.state === 'DISMISSED' ? 'Dismissed review' : 'Root review'),
-    url: review?.url ?? null,
+    summary: normalizedText(body, review?.state === 'DISMISSED' ? 'Dismissed review' : 'Root review'),
+    url: normalizedUrl(review?.url),
     source: 'root-review',
   }];
 }
@@ -310,14 +327,14 @@ function isMarkerComment(comment) {
 
 function normalizeMarkerComment(comment) {
   const history = {
-    id: `marker:${comment.id}`,
+    id: normalizedText(`marker:${comment.id}`, 'marker:unknown'),
     status: 'reported',
     path: null,
     line: null,
     summary: comment.body.includes(CURRENT_MARKER)
       ? 'Blast Radius Buddy run history'
       : 'Legacy Review Tube Man run history',
-    url: comment.html_url ?? comment.url ?? null,
+    url: normalizedUrl(comment.html_url ?? comment.url),
     source: 'run-history',
   };
   const findings = parseBuddyMetadata(comment.body)
@@ -427,19 +444,26 @@ export function applyReviewAssessments(entries, assessments) {
 
 function packetLine(entry) {
   const statuses = unique(entry.statuses ?? [entry.status])
-    .map(metadataField)
+    .map(displayField)
     .filter(Boolean)
     .join('/');
   const location = entry.path
-    ? `${metadataField(entry.path)}${entry.line ? `:${entry.line}` : ''}`
+    ? `${displayField(entry.path)}${entry.line ? `:${entry.line}` : ''}`
     : 'general';
   const urls = unique(entry.urls ?? [entry.url])
-    .map(metadataField)
+    .map(normalizedUrl)
     .filter(Boolean)
-    .join(', ');
-  const suffix = urls ? ` — ${urls}` : '';
-  return `- [${statuses}] ${metadataField(entry.id)} ${location} — ${shortSummary(entry.summary)}${suffix}`
+  let line = `- [${statuses}] ${displayField(entry.id)} ${location} — ${displayField(entry.summary)}`
     .slice(0, PACKET_LINE_LIMIT);
+  let appendedUrl = false;
+  for (const url of urls) {
+    const separator = appendedUrl ? ', ' : ' — ';
+    if (line.length + separator.length + url.length <= PACKET_LINE_LIMIT) {
+      line += `${separator}${url}`;
+      appendedUrl = true;
+    }
+  }
+  return line;
 }
 
 export function compactReviewLedger(entries) {
