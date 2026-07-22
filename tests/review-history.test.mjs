@@ -489,12 +489,13 @@ test('ledger preserves structural paths and URLs while compact output stays boun
   assert.equal(packet.includes('https://example.com/reviews/'), false);
 });
 
-test('metadata paths preserve ordinary spaces and reject control characters', async () => {
+test('metadata paths preserve ordinary spaces and reject C0 and C1 controls', async () => {
   const exactPath = ' src/Metadata  File.ts ';
   const metadata = {
     findings: [
       { id: 'BRB401', title: 'Exact path', path: exactPath, line: 3 },
       { id: 'BRB402', title: 'Bad path', path: 'src/Bad\nPath.ts', line: 4 },
+      { id: 'BRB403', title: 'C1 path', path: 'src/Bad\u0085Path.ts', line: 5 },
     ],
   };
   const execute = fakeExecute([
@@ -521,9 +522,11 @@ test('metadata paths preserve ordinary spaces and reject control characters', as
   });
   const preserved = entries.find(({ id }) => id === 'BRB401');
   const rejected = entries.find(({ id }) => id === 'BRB402');
+  const rejectedC1 = entries.find(({ id }) => id === 'BRB403');
 
   assert.equal(preserved.path, exactPath);
   assert.equal(rejected.path, null);
+  assert.equal(rejectedC1.path, null);
   assert.match(compactReviewLedger([preserved]), /src\/Metadata File\.ts/);
   assert.equal(preserved.path, exactPath);
 });

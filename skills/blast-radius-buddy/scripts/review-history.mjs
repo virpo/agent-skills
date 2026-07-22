@@ -135,7 +135,7 @@ function normalizedUrl(value) {
 function structuralPath(value) {
   return typeof value === 'string'
     && value.length > 0
-    && !/[\x00-\x1f\x7f]/.test(value)
+    && !/[\x00-\x1f\x7f-\x9f]/.test(value)
     ? value
     : null;
 }
