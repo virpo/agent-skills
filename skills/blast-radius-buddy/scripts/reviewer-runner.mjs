@@ -215,8 +215,7 @@ export function launchClaude(
       finish(error);
     };
     const stdinError = (error) => {
-      if (termination?.killSent) return;
-      finish(error);
+      beginTermination(error, 'SIGTERM');
     };
     const childExit = (code, signalValue) => {
       exitCode = code;

@@ -284,6 +284,122 @@ test('child error after a termination signal still waits for the close guard', a
   assert.equal(child.listenerCount('close'), 0);
 });
 
+test('stdin EPIPE waits for close before cleanup and permits retry', async () => {
+  const events = [];
+  const child = controlledChild(events, 'child');
+  const epipe = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+  const directories = [];
+  let attempts = 0;
+  let firstLaunchPromise;
+  let resolveSpawn;
+  const spawned = new Promise((resolve) => { resolveSpawn = resolve; });
+  let settled = false;
+
+  const resultPromise = runReviewer({
+    prompt: 'packet',
+    timeoutMs: 1_000,
+    retries: 1,
+    launch: (options) => {
+      attempts += 1;
+      directories.push(options.cwd);
+      events.push(`spawn:${attempts}`);
+      if (attempts > 1) return Promise.resolve(COMPLETE_REVIEW);
+      firstLaunchPromise = launchClaude(options, {
+        termGraceMs: 100,
+        killGuardMs: 100,
+        spawnImpl: () => {
+          resolveSpawn();
+          return child;
+        },
+      });
+      return firstLaunchPromise;
+    },
+    validate: (output) => parseProtocolBlock(output, 'brb-review'),
+  });
+  void resultPromise.then(
+    () => { settled = true; },
+    () => { settled = true; },
+  );
+
+  try {
+    await spawned;
+    const firstOutcome = firstLaunchPromise.then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+    child.stdin.emit('error', epipe);
+    await delay(0);
+
+    assert.equal(settled, false);
+    assert.equal(attempts, 1);
+    assert.equal(child.listenerCount('close'), 1);
+    assert.deepEqual(events, ['spawn:1', 'child:SIGTERM']);
+    await access(directories[0]);
+
+    await child.termSent;
+    child.close(null, 'SIGTERM');
+    assert.deepEqual(await firstOutcome, { error: epipe });
+    assert.deepEqual(
+      await resultPromise,
+      { status: 'complete', findings: [] },
+    );
+    assert.deepEqual(events, [
+      'spawn:1', 'child:SIGTERM', 'child:exit', 'child:close', 'spawn:2',
+    ]);
+    await assertMissing(directories[0]);
+    await assertMissing(directories[1]);
+  } finally {
+    child.close(null, 'SIGTERM');
+    await resultPromise.catch(() => {});
+  }
+});
+
+test('unterminated stdin EPIPE prevents retry and preserves its cwd', async () => {
+  const events = [];
+  const child = controlledChild(events, 'child');
+  const epipe = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+  let attempts = 0;
+  let firstDirectory;
+  let resolveSpawn;
+  const spawned = new Promise((resolve) => { resolveSpawn = resolve; });
+  const resultPromise = runReviewer({
+    prompt: 'packet',
+    timeoutMs: 1_000,
+    retries: 1,
+    launch: (options) => {
+      attempts += 1;
+      if (attempts > 1) return Promise.resolve(COMPLETE_REVIEW);
+      firstDirectory = options.cwd;
+      return launchClaude(options, {
+        termGraceMs: 2,
+        killGuardMs: 2,
+        spawnImpl: () => {
+          resolveSpawn();
+          return child;
+        },
+      });
+    },
+    validate: (output) => parseProtocolBlock(output, 'brb-review'),
+  });
+
+  try {
+    await spawned;
+    child.stdin.emit('error', epipe);
+    await assert.rejects(
+      resultPromise,
+      (error) => error.name === 'UnterminatedReviewerChildError'
+        && error.message === 'Claude child did not exit after SIGKILL',
+    );
+    assert.equal(attempts, 1);
+    assert.deepEqual(events, ['child:SIGTERM', 'child:SIGKILL']);
+    await access(firstDirectory);
+  } finally {
+    if (typeof firstDirectory === 'string' && firstDirectory.startsWith(REVIEW_PREFIX)) {
+      await rm(firstDirectory, { recursive: true, force: true });
+    }
+  }
+});
+
 test('unterminated child after SIGKILL prevents retry and preserves its cwd', async () => {
   const events = [];
   const firstChild = controlledChild(events, 'child');
@@ -457,6 +573,11 @@ test('output cap waits through child exit for close before cleanup', async () =>
     await spawned;
     child.stdout.write(Buffer.alloc(10 * 1024 * 1024 + 1, 97));
     await child.killSent;
+    child.stdin.emit(
+      'error',
+      Object.assign(new Error('late write EPIPE'), { code: 'EPIPE' }),
+    );
+    await delay(0);
     assert.equal(settled, false);
     assert.deepEqual(events, ['child:SIGKILL']);
     await access(directory);
