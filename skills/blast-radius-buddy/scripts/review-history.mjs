@@ -132,6 +132,14 @@ function normalizedUrl(value) {
   }
 }
 
+function structuralPath(value) {
+  return typeof value === 'string'
+    && value.length > 0
+    && !/[\x00-\x1f\x7f]/.test(value)
+    ? value
+    : null;
+}
+
 function unique(values) {
   return [...new Set(values.filter((value) => value !== null && value !== undefined && value !== ''))];
 }
@@ -204,7 +212,7 @@ function normalizeThread(thread, prAuthor) {
   return {
     id,
     status: classifyThread(thread ?? {}, prAuthor),
-    path: normalizeString(root?.path) || null,
+    path: structuralPath(root?.path),
     line: root?.line ?? root?.originalLine ?? null,
     summary: normalizedText(removeInlineFindingMarker(root?.body), 'Review thread'),
     url: normalizedUrl(root?.url),
@@ -264,7 +272,7 @@ function metadataEntries(record, review, source = 'root-review', forcedStatus = 
       return {
         id: stableId || canonicalKey,
         status: forcedStatus ?? (finding.status === 'suppressed' ? 'suppressed' : 'reported'),
-        path: normalizeString(finding.path) || null,
+        path: structuralPath(finding.path),
         line: Number.isSafeInteger(finding.line) && finding.line > 0 ? finding.line : null,
         summary: normalizedText(finding.title, 'Prior Buddy finding'),
         url: normalizedUrl(review.url ?? review.html_url),

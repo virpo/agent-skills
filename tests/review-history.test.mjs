@@ -155,6 +155,34 @@ test('loadReviewThreads follows review-thread pagination and normalizes roots', 
   assert.match(execute.calls[1].args.join(' '), /cursor=cursor-1/);
 });
 
+test('loadReviewThreads preserves GraphQL path bytes', async () => {
+  const exactPath = 'src/My  File.ts';
+  const execute = fakeExecute([makeThreadPage({
+    nodes: [{
+      id: 'T-path',
+      isResolved: false,
+      isOutdated: false,
+      resolvedBy: null,
+      comments: { nodes: [comment({
+        id: 'C-path',
+        body: 'Keep the exact repository path',
+        url: 'https://example/thread-path',
+        path: exactPath,
+      })] },
+    }],
+  })]);
+
+  const [entry] = await loadReviewThreads({
+    repo: 'acme/widget',
+    number: 19,
+    headSha: 'abcdef0',
+    prAuthor: 'author',
+    execute,
+  });
+
+  assert.equal(entry.path, exactPath);
+});
+
 test('loadReviewLedger combines threads, paginated reviews, Buddy metadata, and marker history', async () => {
   const longDismissedBody = `Dismissed root summary ${'x'.repeat(240)} PRIVATE-TAIL`;
   const metadata = {
@@ -459,6 +487,45 @@ test('ledger preserves structural paths and URLs while compact output stays boun
   assert.doesNotMatch(packet, /SUMMARY-TAIL/);
   assert.equal(packet.includes(longUrl), false);
   assert.equal(packet.includes('https://example.com/reviews/'), false);
+});
+
+test('metadata paths preserve ordinary spaces and reject control characters', async () => {
+  const exactPath = ' src/Metadata  File.ts ';
+  const metadata = {
+    findings: [
+      { id: 'BRB401', title: 'Exact path', path: exactPath, line: 3 },
+      { id: 'BRB402', title: 'Bad path', path: 'src/Bad\nPath.ts', line: 4 },
+    ],
+  };
+  const execute = fakeExecute([
+    makeThreadPage({ nodes: [] }),
+    makeReviewPage({
+      nodes: [{
+        id: 'R-paths',
+        body: `<!-- blast-radius-buddy-review:${JSON.stringify(metadata)} -->`,
+        url: 'https://example/review-paths',
+        state: 'COMMENTED',
+        submittedAt: '2026-07-20T10:00:00Z',
+        author: { login: 'reviewer' },
+      }],
+    }),
+    { stdout: '[[]]' },
+  ]);
+
+  const entries = await loadReviewLedger({
+    repo: 'acme/widget',
+    number: 19,
+    headSha: 'abcdef0',
+    prAuthor: 'author',
+    execute,
+  });
+  const preserved = entries.find(({ id }) => id === 'BRB401');
+  const rejected = entries.find(({ id }) => id === 'BRB402');
+
+  assert.equal(preserved.path, exactPath);
+  assert.equal(rejected.path, null);
+  assert.match(compactReviewLedger([preserved]), /src\/Metadata File\.ts/);
+  assert.equal(preserved.path, exactPath);
 });
 
 test('inline finding marker coalesces a live thread with root review metadata', async () => {
