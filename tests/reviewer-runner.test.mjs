@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { access } from 'node:fs/promises';
+import { access, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import {
   CLAUDE_REVIEW_ARGS,
@@ -36,6 +37,33 @@ function fakeChild({ stdout = '', stderr = '', code = 0 } = {}) {
     child.stderr.end(stderr);
     child.emit('close', code, null);
   });
+  return child;
+}
+
+function controlledChild(events, label) {
+  const child = new EventEmitter();
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.closedByTest = false;
+  let resolveTerm;
+  let resolveKill;
+  child.termSent = new Promise((resolve) => { resolveTerm = resolve; });
+  child.killSent = new Promise((resolve) => { resolveKill = resolve; });
+  child.kill = (signal) => {
+    events.push(`${label}:${signal}`);
+    if (signal === 'SIGTERM') resolveTerm();
+    if (signal === 'SIGKILL') resolveKill();
+    return true;
+  };
+  child.close = (code = null, signal = 'SIGTERM') => {
+    if (child.closedByTest) return;
+    child.closedByTest = true;
+    events.push(`${label}:close`);
+    child.stdout.end();
+    child.stderr.end();
+    child.emit('close', code, signal);
+  };
   return child;
 }
 
@@ -97,7 +125,13 @@ test('runReviewer aborts a timed-out attempt and cleans its directory', async ()
       launch: async ({ cwd, signal }) => {
         directory = cwd;
         observedSignal = signal;
-        return new Promise(() => {});
+        return new Promise((_, reject) => {
+          signal.addEventListener(
+            'abort',
+            () => reject(new Error('external launcher honored abort')),
+            { once: true },
+          );
+        });
       },
       validate: () => assert.fail('validation must not run after timeout'),
     }),
@@ -106,6 +140,157 @@ test('runReviewer aborts a timed-out attempt and cleans its directory', async ()
 
   assert.equal(observedSignal.aborted, true);
   await assertMissing(directory);
+});
+
+test('timeout waits for TERM, KILL, and child close before cleanup and retry', async () => {
+  const events = [];
+  const firstChild = controlledChild(events, 'first');
+  const directories = [];
+  let attempts = 0;
+  let settled = false;
+
+  const resultPromise = runReviewer({
+    prompt: 'packet',
+    timeoutMs: 2,
+    retries: 1,
+    launch: (options) => launchClaude(options, {
+      termGraceMs: 5,
+      killGuardMs: 100,
+      spawnImpl: () => {
+        attempts += 1;
+        directories.push(options.cwd);
+        events.push(`spawn:${attempts}`);
+        return attempts === 1
+          ? firstChild
+          : fakeChild({ stdout: COMPLETE_REVIEW });
+      },
+    }),
+    validate: (output) => parseProtocolBlock(output, 'brb-review'),
+  });
+  void resultPromise.then(
+    () => { settled = true; },
+    () => { settled = true; },
+  );
+
+  try {
+    await firstChild.termSent;
+    await delay(12);
+    assert.equal(settled, false);
+    assert.equal(attempts, 1);
+    assert.deepEqual(events, ['spawn:1', 'first:SIGTERM', 'first:SIGKILL']);
+    await access(directories[0]);
+
+    firstChild.close(null, 'SIGKILL');
+    assert.deepEqual(
+      await resultPromise,
+      { status: 'complete', findings: [] },
+    );
+    assert.deepEqual(events, [
+      'spawn:1', 'first:SIGTERM', 'first:SIGKILL', 'first:close', 'spawn:2',
+    ]);
+    await assertMissing(directories[0]);
+    await assertMissing(directories[1]);
+  } finally {
+    firstChild.close(null, 'SIGKILL');
+    await resultPromise.catch(() => {});
+  }
+});
+
+test('close after SIGTERM settles without sending SIGKILL', async () => {
+  const events = [];
+  const child = controlledChild(events, 'child');
+  const controller = new AbortController();
+  let settled = false;
+  const launchPromise = launchClaude(
+    { cwd: '/neutral/reviewer', input: 'packet', signal: controller.signal },
+    { spawnImpl: () => child, termGraceMs: 20, killGuardMs: 20 },
+  );
+  void launchPromise.then(
+    () => { settled = true; },
+    () => { settled = true; },
+  );
+
+  try {
+    controller.abort();
+    await child.termSent;
+    await delay(0);
+    assert.equal(settled, false);
+
+    child.close(null, 'SIGTERM');
+    await assert.rejects(
+      launchPromise,
+      (error) => error.name === 'AbortError' && error.message === 'Claude review aborted',
+    );
+    await delay(30);
+    assert.deepEqual(events, ['child:SIGTERM', 'child:close']);
+  } finally {
+    child.close(null, 'SIGTERM');
+    await launchPromise.catch(() => {});
+  }
+});
+
+test('child error during termination clears escalation without double settlement', async () => {
+  const events = [];
+  const child = controlledChild(events, 'child');
+  const controller = new AbortController();
+  const launchPromise = launchClaude(
+    { cwd: '/neutral/reviewer', input: 'packet', signal: controller.signal },
+    { spawnImpl: () => child, termGraceMs: 2, killGuardMs: 2 },
+  );
+
+  controller.abort();
+  await child.termSent;
+  child.emit('error', new Error('signal delivery failed'));
+
+  await assert.rejects(
+    launchPromise,
+    (error) => error.name === 'UnterminatedReviewerChildError'
+      && error.message === 'Claude child lifecycle could not be confirmed after process error',
+  );
+  assert.deepEqual(events, ['child:SIGTERM']);
+  assert.equal(child.listenerCount('error'), 0);
+  assert.equal(child.listenerCount('exit'), 0);
+  assert.equal(child.listenerCount('close'), 0);
+});
+
+test('unterminated child after SIGKILL prevents retry and preserves its cwd', async () => {
+  const events = [];
+  const firstChild = controlledChild(events, 'child');
+  let attempts = 0;
+  let directory;
+
+  const resultPromise = runReviewer({
+    prompt: 'packet',
+    timeoutMs: 1,
+    retries: 1,
+    launch: (options) => {
+      attempts += 1;
+      directory = options.cwd;
+      return attempts === 1
+        ? launchClaude(options, {
+          spawnImpl: () => firstChild,
+          termGraceMs: 2,
+          killGuardMs: 2,
+        })
+        : Promise.resolve(COMPLETE_REVIEW);
+    },
+    validate: (output) => parseProtocolBlock(output, 'brb-review'),
+  });
+
+  try {
+    await assert.rejects(
+      resultPromise,
+      (error) => error.name === 'UnterminatedReviewerChildError'
+        && error.message === 'Claude child did not exit after SIGKILL',
+    );
+    assert.equal(attempts, 1);
+    assert.deepEqual(events, ['child:SIGTERM', 'child:SIGKILL']);
+    await access(directory);
+  } finally {
+    if (typeof directory === 'string' && directory.startsWith(REVIEW_PREFIX)) {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
 });
 
 test('runReviewer propagates the second failure and cleans both attempts', async () => {

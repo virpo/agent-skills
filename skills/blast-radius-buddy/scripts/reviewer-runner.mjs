@@ -35,6 +35,13 @@ export const CLAUDE_REVIEW_ARGS = Object.freeze([
   '--no-session-persistence', '--permission-mode', 'plan', '--print',
 ]);
 
+export class UnterminatedReviewerChildError extends Error {
+  constructor(message = 'Claude child did not exit after SIGKILL') {
+    super(message);
+    this.name = 'UnterminatedReviewerChildError';
+  }
+}
+
 function validateRunOptions({ prompt, launch, validate, timeoutMs, retries }) {
   if (typeof prompt !== 'string' || prompt.trim().length === 0) {
     throw new TypeError('prompt must be a non-empty string');
@@ -68,28 +75,41 @@ export async function runReviewer({
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     const directory = await mkdtemp(REVIEW_DIRECTORY_PREFIX);
     const controller = new AbortController();
+    let preserveDirectory = false;
+    let timedOut = false;
     let timer;
 
     try {
-      const timeout = new Promise((_, reject) => {
-        timer = setTimeout(() => {
-          controller.abort();
-          reject(new Error(`Reviewer timed out after ${timeoutMs} ms`));
-        }, timeoutMs);
-      });
-      const output = await Promise.race([
-        launch({ cwd: directory, input: prompt, signal: controller.signal }),
-        timeout,
-      ]);
+      timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs);
+      let output;
+      try {
+        // Injected launchers must honor AbortSignal and settle only after any
+        // process or resource they own has stopped using this attempt cwd.
+        output = await launch({ cwd: directory, input: prompt, signal: controller.signal });
+      } catch (error) {
+        if (error instanceof UnterminatedReviewerChildError) throw error;
+        if (timedOut) {
+          throw new Error(`Reviewer timed out after ${timeoutMs} ms`, { cause: error });
+        }
+        throw error;
+      }
+      if (timedOut) throw new Error(`Reviewer timed out after ${timeoutMs} ms`);
       if (typeof output !== 'string') {
         throw new TypeError('launch must resolve to a string');
       }
       return await validate(output);
     } catch (error) {
+      if (error instanceof UnterminatedReviewerChildError) {
+        preserveDirectory = true;
+        throw error;
+      }
       if (attempt === retries) throw error;
     } finally {
       clearTimeout(timer);
-      await removeReviewDirectory(directory);
+      if (!preserveDirectory) await removeReviewDirectory(directory);
     }
   }
 
@@ -98,7 +118,11 @@ export async function runReviewer({
 
 export function launchClaude(
   { cwd, input, signal },
-  { spawnImpl = spawn } = {},
+  {
+    spawnImpl = spawn,
+    termGraceMs = 1_000,
+    killGuardMs = 1_000,
+  } = {},
 ) {
   return new Promise((resolveLaunch, rejectLaunch) => {
     let settled = false;
@@ -106,21 +130,46 @@ export function launchClaude(
     const stdout = [];
     const stderr = [];
     let child;
+    let termTimer;
+    let killGuardTimer;
+    let terminationError;
+
+    const clearLifecycle = () => {
+      clearTimeout(termTimer);
+      clearTimeout(killGuardTimer);
+      signal?.removeEventListener('abort', abort);
+      child?.off('error', childError);
+      child?.off('exit', childExit);
+      child?.off('close', childClose);
+      child?.stdin?.off('error', stdinError);
+      child?.stdout?.off('data', captureStdout);
+      child?.stderr?.off('data', captureStderr);
+    };
 
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
-      signal?.removeEventListener('abort', abort);
+      clearLifecycle();
       if (error) rejectLaunch(error);
       else resolveLaunch(value);
     };
+    const unterminated = () => finish(new UnterminatedReviewerChildError());
+    const startKillGuard = () => {
+      killGuardTimer = setTimeout(unterminated, killGuardMs);
+    };
     const abort = () => {
-      child?.kill('SIGTERM');
-      const error = new Error('Claude review aborted');
-      error.name = 'AbortError';
-      finish(error);
+      if (settled || terminationError) return;
+      terminationError = new Error('Claude review aborted');
+      terminationError.name = 'AbortError';
+      child.kill('SIGTERM');
+      termTimer = setTimeout(() => {
+        if (settled) return;
+        child.kill('SIGKILL');
+        startKillGuard();
+      }, termGraceMs);
     };
     const capture = (target) => (chunk) => {
+      if (settled || terminationError) return;
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       capturedBytes += bytes.length;
       if (capturedBytes > MAX_CAPTURE_BYTES) {
@@ -130,6 +179,43 @@ export function launchClaude(
       }
       target.push(bytes);
     };
+    const captureStdout = capture(stdout);
+    const captureStderr = capture(stderr);
+    const childError = (error) => {
+      if (terminationError) {
+        finish(new UnterminatedReviewerChildError(
+          'Claude child lifecycle could not be confirmed after process error',
+        ));
+        return;
+      }
+      finish(error);
+    };
+    const stdinError = (error) => {
+      if (terminationError) return;
+      finish(error);
+    };
+    const childExit = () => {
+      if (terminationError) finish(terminationError);
+    };
+    const childClose = (code, closeSignal) => {
+      if (terminationError) {
+        finish(terminationError);
+        return;
+      }
+      if (code === 0) {
+        finish(undefined, Buffer.concat(stdout).toString('utf8'));
+        return;
+      }
+      const diagnostic = Buffer.concat(stderr).toString('utf8').trim();
+      const reason = code === null
+        ? `signal ${closeSignal ?? 'unknown'}`
+        : `code ${code}`;
+      finish(new Error(
+        diagnostic.length > 0
+          ? `Claude exited with ${reason}: ${diagnostic}`
+          : `Claude exited with ${reason}`,
+      ));
+    };
 
     try {
       child = spawnImpl('claude', CLAUDE_REVIEW_ARGS, {
@@ -137,25 +223,12 @@ export function launchClaude(
         shell: false,
         env: minimalEnvironment,
       });
-      child.stdout.on('data', capture(stdout));
-      child.stderr.on('data', capture(stderr));
-      child.on('error', finish);
-      child.stdin.on('error', finish);
-      child.on('close', (code, closeSignal) => {
-        if (code === 0) {
-          finish(undefined, Buffer.concat(stdout).toString('utf8'));
-          return;
-        }
-        const diagnostic = Buffer.concat(stderr).toString('utf8').trim();
-        const reason = code === null
-          ? `signal ${closeSignal ?? 'unknown'}`
-          : `code ${code}`;
-        finish(new Error(
-          diagnostic.length > 0
-            ? `Claude exited with ${reason}: ${diagnostic}`
-            : `Claude exited with ${reason}`,
-        ));
-      });
+      child.stdout.on('data', captureStdout);
+      child.stderr.on('data', captureStderr);
+      child.on('error', childError);
+      child.on('exit', childExit);
+      child.on('close', childClose);
+      child.stdin.on('error', stdinError);
       signal?.addEventListener('abort', abort, { once: true });
       if (signal?.aborted) {
         abort();
