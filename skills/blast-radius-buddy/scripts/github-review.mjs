@@ -337,9 +337,6 @@ export function collectChangedLines(diff) {
       if (hunk.oldSeen > hunk.oldCount || hunk.newSeen > hunk.newCount) {
         hunk.valid = false;
       }
-      if (hunk.oldSeen === hunk.oldCount && hunk.newSeen === hunk.newCount) {
-        flushHunk();
-      }
       continue;
     }
     if (line.startsWith('--- ')) {

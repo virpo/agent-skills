@@ -232,6 +232,19 @@ test('collectChangedLines treats file-header lookalikes inside a hunk as changed
   ]));
 });
 
+test('collectChangedLines rejects a hunk that overruns its declared line counts', () => {
+  const diff = [
+    'diff --git a/src/overlong.ts b/src/overlong.ts',
+    '--- a/src/overlong.ts',
+    '+++ b/src/overlong.ts',
+    '@@ -0,0 +1 @@',
+    '+declared line',
+    '+unexpected extra line',
+  ].join('\n');
+
+  assert.deepEqual(collectChangedLines(diff), new Map());
+});
+
 test('partitionInlineFindings keeps exact anchors and moves unanchored findings to bodyOnly', () => {
   const anchored = clone(FINDING);
   const unanchored = {
