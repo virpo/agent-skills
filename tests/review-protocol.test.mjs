@@ -307,10 +307,80 @@ test('validateVerificationResult enforces verdicts and stable challenge targets'
   );
 });
 
+test('decideReviewEvent rejects missing and extra gate fields as marker-only', () => {
+  for (const field of Object.keys(CLEAN_GATES)) {
+    const gates = clone(CLEAN_GATES);
+    delete gates[field];
+    assert.throws(
+      () => decideReviewEvent(gates),
+      new Error('Review is incomplete; update the marker only'),
+    );
+  }
+
+  assert.throws(
+    () => decideReviewEvent({ ...CLEAN_GATES, extra: true }),
+    new Error('Review is incomplete; update the marker only'),
+  );
+});
+
+test('decideReviewEvent requires real booleans for every gate state', () => {
+  for (const field of [
+    'reviewersComplete',
+    'reproductionComplete',
+    'materialUncertainty',
+    'headUnchanged',
+  ]) {
+    for (const value of ['false', 0, null]) {
+      assert.throws(
+        () => decideReviewEvent({ ...CLEAN_GATES, [field]: value }),
+        new Error('Review is incomplete; update the marker only'),
+      );
+    }
+  }
+});
+
+test('decideReviewEvent rejects invalid verdicts and non-array collection fields', () => {
+  assert.throws(
+    () => decideReviewEvent({ ...CLEAN_GATES, verifierVerdict: 'uncertain' }),
+    new Error('Review is incomplete; update the marker only'),
+  );
+
+  for (const [field, value] of [
+    ['findings', ''],
+    ['findings', {}],
+    ['findings', null],
+    ['failedRequiredChecks', ''],
+    ['failedRequiredChecks', {}],
+    ['failedRequiredChecks', null],
+  ]) {
+    assert.throws(
+      () => decideReviewEvent({ ...CLEAN_GATES, [field]: value }),
+      new Error('Review is incomplete; update the marker only'),
+    );
+  }
+});
+
+test('decideReviewEvent validates collection members before choosing an event', () => {
+  for (const finding of [null, 'finding', 42, false]) {
+    assert.throws(
+      () => decideReviewEvent({ ...CLEAN_GATES, findings: [finding] }),
+      new Error('Review is incomplete; update the marker only'),
+    );
+  }
+  for (const check of ['', '   ', null, 42, false]) {
+    assert.throws(
+      () => decideReviewEvent({ ...CLEAN_GATES, failedRequiredChecks: [check] }),
+      new Error('Review is incomplete; update the marker only'),
+    );
+  }
+
+  assert.equal(decideReviewEvent({ ...CLEAN_GATES, findings: [{}] }), 'COMMENT');
+});
+
 test('decideReviewEvent enforces marker-only, COMMENT, and APPROVE gates', () => {
   assert.equal(decideReviewEvent(CLEAN_GATES), 'APPROVE');
   assert.equal(decideReviewEvent({ ...CLEAN_GATES, findings: [FINDING] }), 'COMMENT');
-  assert.equal(decideReviewEvent({ ...CLEAN_GATES, verifierVerdict: 'uncertain' }), 'COMMENT');
+  assert.equal(decideReviewEvent({ ...CLEAN_GATES, verifierVerdict: 'defer' }), 'COMMENT');
   assert.equal(decideReviewEvent({ ...CLEAN_GATES, materialUncertainty: true }), 'COMMENT');
   assert.equal(decideReviewEvent({ ...CLEAN_GATES, failedRequiredChecks: ['test'] }), 'COMMENT');
 
@@ -347,22 +417,30 @@ test('main validates protocol blocks, selects candidates, and decides events rea
   ]);
 });
 
-test('the executable exits non-zero with the marker-only error for incomplete gates', async (t) => {
+test('the executable exits non-zero with the marker-only error for invalid or incomplete gates', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'brb-protocol-'));
-  const input = join(directory, 'gates.json');
-  await writeFile(input, JSON.stringify({ ...CLEAN_GATES, headUnchanged: false }));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const script = fileURLToPath(
     new URL('../skills/blast-radius-buddy/scripts/review-protocol.mjs', import.meta.url),
   );
 
-  await assert.rejects(
-    execFileAsync(process.execPath, [script, 'decide-event', '--input', input]),
-    (error) => {
-      assert.equal(error.code, 1);
-      assert.equal(error.stdout, '');
-      assert.equal(error.stderr, 'Review is incomplete; update the marker only\n');
-      return true;
-    },
-  );
+  const missingField = clone(CLEAN_GATES);
+  delete missingField.materialUncertainty;
+  const cases = [
+    ['incomplete', { ...CLEAN_GATES, headUnchanged: false }],
+    ['invalid', missingField],
+  ];
+  for (const [name, gates] of cases) {
+    const input = join(directory, `${name}.json`);
+    await writeFile(input, JSON.stringify(gates));
+    await assert.rejects(
+      execFileAsync(process.execPath, [script, 'decide-event', '--input', input]),
+      (error) => {
+        assert.equal(error.code, 1);
+        assert.equal(error.stdout, '');
+        assert.equal(error.stderr, 'Review is incomplete; update the marker only\n');
+        return true;
+      },
+    );
+  }
 });

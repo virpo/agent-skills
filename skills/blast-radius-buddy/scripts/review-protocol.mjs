@@ -57,6 +57,15 @@ const PROOF_RISK_FLAGS = [
   'deletionSensitive',
   'scopeUncertain',
 ];
+const REVIEW_GATE_FIELDS = [
+  'reviewersComplete',
+  'reproductionComplete',
+  'materialUncertainty',
+  'verifierVerdict',
+  'findings',
+  'failedRequiredChecks',
+  'headUnchanged',
+];
 const SEVERITY_RANK = new Map([
   ['critical', 0],
   ['high', 1],
@@ -365,15 +374,43 @@ export function validateVerificationResult(value) {
   };
 }
 
-export function decideReviewEvent({
-  reviewersComplete,
-  reproductionComplete,
-  materialUncertainty,
-  verifierVerdict,
-  findings,
-  failedRequiredChecks,
-  headUnchanged,
-}) {
+function validReviewGateEnvelope(value) {
+  if (!plainObject(value)) return false;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== REVIEW_GATE_FIELDS.length
+    || keys.some((key) => typeof key !== 'string' || !REVIEW_GATE_FIELDS.includes(key))
+    || REVIEW_GATE_FIELDS.some((field) => !Object.hasOwn(value, field))) {
+    return false;
+  }
+  if (typeof value.reviewersComplete !== 'boolean'
+    || typeof value.reproductionComplete !== 'boolean'
+    || typeof value.materialUncertainty !== 'boolean'
+    || typeof value.headUnchanged !== 'boolean'
+    || !VERIFICATION_VERDICTS.has(value.verifierVerdict)
+    || !Array.isArray(value.findings)
+    || !value.findings.every((finding) => plainObject(finding))
+    || !Array.isArray(value.failedRequiredChecks)
+    || !value.failedRequiredChecks.every(
+      (check) => typeof check === 'string' && check.trim().length > 0,
+    )) {
+    return false;
+  }
+  return true;
+}
+
+export function decideReviewEvent(gates) {
+  if (!validReviewGateEnvelope(gates)) {
+    throw new Error('Review is incomplete; update the marker only');
+  }
+  const {
+    reviewersComplete,
+    reproductionComplete,
+    materialUncertainty,
+    verifierVerdict,
+    findings,
+    failedRequiredChecks,
+    headUnchanged,
+  } = gates;
   if (!headUnchanged || !reviewersComplete || !reproductionComplete) {
     throw new Error('Review is incomplete; update the marker only');
   }
