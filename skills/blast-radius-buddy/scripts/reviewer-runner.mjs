@@ -85,11 +85,12 @@ export async function runReviewer({
     let preserveDirectory = false;
     let timedOut = false;
     let timer;
+    const timeoutError = new Error(`Reviewer timed out after ${timeoutMs} ms`);
 
     try {
       timer = setTimeout(() => {
         timedOut = true;
-        controller.abort();
+        controller.abort(timeoutError);
       }, timeoutMs);
       let output;
       try {
@@ -99,12 +100,13 @@ export async function runReviewer({
       } catch (error) {
         if (error instanceof UnterminatedReviewerChildError) throw error;
         if (error instanceof ReviewerOutputLimitError) throw error;
-        if (timedOut) {
+        if (timedOut && error === controller.signal.reason) throw error;
+        if (timedOut && error?.name === 'AbortError') {
           throw new Error(`Reviewer timed out after ${timeoutMs} ms`, { cause: error });
         }
         throw error;
       }
-      if (timedOut) throw new Error(`Reviewer timed out after ${timeoutMs} ms`);
+      if (timedOut) throw timeoutError;
       if (typeof output !== 'string') {
         throw new TypeError('launch must resolve to a string');
       }

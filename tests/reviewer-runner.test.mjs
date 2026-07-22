@@ -139,7 +139,11 @@ test('runReviewer aborts a timed-out attempt and cleans its directory', async ()
         return new Promise((_, reject) => {
           signal.addEventListener(
             'abort',
-            () => reject(new Error('external launcher honored abort')),
+            () => {
+              const error = new Error('external launcher honored abort');
+              error.name = 'AbortError';
+              reject(error);
+            },
             { once: true },
           );
         });
@@ -351,6 +355,89 @@ test('stdin EPIPE waits for close before cleanup and permits retry', async () =>
   } finally {
     child.close(null, 'SIGTERM');
     await resultPromise.catch(() => {});
+  }
+});
+
+test('stdin EPIPE remains first cause when outer timeout fires before close', async () => {
+  const events = [];
+  const children = [
+    controlledChild(events, 'first'),
+    controlledChild(events, 'second'),
+  ];
+  const epipe = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+  const directories = [];
+  const signals = [];
+  const aborted = [];
+  const spawnResolvers = [];
+  const spawned = children.map((_, index) => new Promise((resolve) => {
+    spawnResolvers[index] = resolve;
+  }));
+  let attempts = 0;
+
+  const resultPromise = runReviewer({
+    prompt: 'packet',
+    timeoutMs: 5,
+    retries: 1,
+    launch: (options) => {
+      const index = attempts;
+      attempts += 1;
+      directories.push(options.cwd);
+      signals.push(options.signal);
+      aborted[index] = new Promise((resolve) => {
+        options.signal.addEventListener('abort', resolve, { once: true });
+      });
+      return launchClaude(options, {
+        termGraceMs: 100,
+        killGuardMs: 100,
+        spawnImpl: () => {
+          spawnResolvers[index]();
+          return children[index];
+        },
+      });
+    },
+    validate: () => assert.fail('EPIPE output must not be validated'),
+  });
+  const resultOutcome = resultPromise.then(
+    (value) => ({ value }),
+    (error) => ({ error }),
+  );
+
+  try {
+    for (let index = 0; index < children.length; index += 1) {
+      await spawned[index];
+      children[index].stdin.emit('error', epipe);
+      await children[index].termSent;
+      await aborted[index];
+
+      assert.equal(signals[index].aborted, true);
+      assert.equal(children[index].listenerCount('close'), 1);
+      assert.deepEqual(
+        events.filter((event) => event.endsWith('SIGTERM')),
+        children.slice(0, index + 1).map((_, childIndex) => (
+          `${childIndex === 0 ? 'first' : 'second'}:SIGTERM`
+        )),
+      );
+      await access(directories[index]);
+
+      children[index].close(null, 'SIGTERM');
+      if (index === 0) {
+        await spawned[1];
+        assert.equal(attempts, 2);
+        await assertMissing(directories[0]);
+      }
+    }
+
+    const outcome = await resultOutcome;
+    assert.equal(outcome.error, epipe);
+    assert.equal(attempts, 2);
+    assert.deepEqual(events, [
+      'first:SIGTERM', 'first:exit', 'first:close',
+      'second:SIGTERM', 'second:exit', 'second:close',
+    ]);
+    await assertMissing(directories[1]);
+  } finally {
+    for (const child of children) child.close(null, 'SIGTERM');
+    await resultOutcome;
   }
 });
 
