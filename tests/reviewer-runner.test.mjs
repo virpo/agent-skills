@@ -28,13 +28,16 @@ function fakeChild({ stdout = '', stderr = '', code = 0 } = {}) {
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   child.killedByTest = false;
-  child.kill = () => {
+  child.killSignals = [];
+  child.kill = (signal) => {
     child.killedByTest = true;
+    child.killSignals.push(signal);
     return true;
   };
   queueMicrotask(() => {
     child.stdout.end(stdout);
     child.stderr.end(stderr);
+    child.emit('exit', code, null);
     child.emit('close', code, null);
   });
   return child;
@@ -46,6 +49,7 @@ function controlledChild(events, label) {
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   child.closedByTest = false;
+  child.exitedByTest = false;
   let resolveTerm;
   let resolveKill;
   child.termSent = new Promise((resolve) => { resolveTerm = resolve; });
@@ -56,8 +60,15 @@ function controlledChild(events, label) {
     if (signal === 'SIGKILL') resolveKill();
     return true;
   };
+  child.exit = (code = null, signal = 'SIGTERM') => {
+    if (child.exitedByTest) return;
+    child.exitedByTest = true;
+    events.push(`${label}:exit`);
+    child.emit('exit', code, signal);
+  };
   child.close = (code = null, signal = 'SIGTERM') => {
     if (child.closedByTest) return;
+    child.exit(code, signal);
     child.closedByTest = true;
     events.push(`${label}:close`);
     child.stdout.end();
@@ -180,13 +191,23 @@ test('timeout waits for TERM, KILL, and child close before cleanup and retry', a
     assert.deepEqual(events, ['spawn:1', 'first:SIGTERM', 'first:SIGKILL']);
     await access(directories[0]);
 
+    firstChild.exit(null, 'SIGKILL');
+    await delay(0);
+    assert.equal(settled, false);
+    assert.equal(attempts, 1);
+    assert.deepEqual(events, [
+      'spawn:1', 'first:SIGTERM', 'first:SIGKILL', 'first:exit',
+    ]);
+    await access(directories[0]);
+
     firstChild.close(null, 'SIGKILL');
     assert.deepEqual(
       await resultPromise,
       { status: 'complete', findings: [] },
     );
     assert.deepEqual(events, [
-      'spawn:1', 'first:SIGTERM', 'first:SIGKILL', 'first:close', 'spawn:2',
+      'spawn:1', 'first:SIGTERM', 'first:SIGKILL',
+      'first:exit', 'first:close', 'spawn:2',
     ]);
     await assertMissing(directories[0]);
     await assertMissing(directories[1]);
@@ -216,38 +237,48 @@ test('close after SIGTERM settles without sending SIGKILL', async () => {
     await delay(0);
     assert.equal(settled, false);
 
+    child.exit(null, 'SIGTERM');
+    await delay(0);
+    assert.equal(settled, false);
     child.close(null, 'SIGTERM');
     await assert.rejects(
       launchPromise,
       (error) => error.name === 'AbortError' && error.message === 'Claude review aborted',
     );
     await delay(30);
-    assert.deepEqual(events, ['child:SIGTERM', 'child:close']);
+    assert.deepEqual(events, ['child:SIGTERM', 'child:exit', 'child:close']);
   } finally {
     child.close(null, 'SIGTERM');
     await launchPromise.catch(() => {});
   }
 });
 
-test('child error during termination clears escalation without double settlement', async () => {
+test('child error after a termination signal still waits for the close guard', async () => {
   const events = [];
   const child = controlledChild(events, 'child');
   const controller = new AbortController();
+  let settled = false;
   const launchPromise = launchClaude(
     { cwd: '/neutral/reviewer', input: 'packet', signal: controller.signal },
     { spawnImpl: () => child, termGraceMs: 2, killGuardMs: 2 },
+  );
+  void launchPromise.then(
+    () => { settled = true; },
+    () => { settled = true; },
   );
 
   controller.abort();
   await child.termSent;
   child.emit('error', new Error('signal delivery failed'));
+  await delay(0);
+  assert.equal(settled, false);
 
   await assert.rejects(
     launchPromise,
     (error) => error.name === 'UnterminatedReviewerChildError'
-      && error.message === 'Claude child lifecycle could not be confirmed after process error',
+      && error.message === 'Claude child did not exit after SIGKILL',
   );
-  assert.deepEqual(events, ['child:SIGTERM']);
+  assert.deepEqual(events, ['child:SIGTERM', 'child:SIGKILL']);
   assert.equal(child.listenerCount('error'), 0);
   assert.equal(child.listenerCount('exit'), 0);
   assert.equal(child.listenerCount('close'), 0);
@@ -388,9 +419,109 @@ test('launchClaude rejects output beyond the combined 10 MiB cap', async () => {
         },
       },
     ),
-    new Error('Claude output exceeded 10 MiB capture limit'),
+    (error) => error.name === 'ReviewerOutputLimitError'
+      && error.message === 'Claude output exceeded 10 MiB capture limit',
   );
   assert.equal(child.killedByTest, true);
+});
+
+test('output cap waits through child exit for close before cleanup', async () => {
+  const events = [];
+  const child = controlledChild(events, 'child');
+  let directory;
+  let resolveSpawn;
+  const spawned = new Promise((resolve) => { resolveSpawn = resolve; });
+  let settled = false;
+  const resultPromise = runReviewer({
+    prompt: 'packet',
+    timeoutMs: 1_000,
+    retries: 0,
+    launch: (options) => {
+      directory = options.cwd;
+      return launchClaude(options, {
+        killGuardMs: 100,
+        spawnImpl: () => {
+          resolveSpawn();
+          return child;
+        },
+      });
+    },
+    validate: () => assert.fail('over-limit output must not be validated'),
+  });
+  void resultPromise.then(
+    () => { settled = true; },
+    () => { settled = true; },
+  );
+
+  try {
+    await spawned;
+    child.stdout.write(Buffer.alloc(10 * 1024 * 1024 + 1, 97));
+    await child.killSent;
+    assert.equal(settled, false);
+    assert.deepEqual(events, ['child:SIGKILL']);
+    await access(directory);
+
+    child.exit(null, 'SIGKILL');
+    await delay(0);
+    assert.equal(settled, false);
+    assert.deepEqual(events, ['child:SIGKILL', 'child:exit']);
+    await access(directory);
+
+    child.close(null, 'SIGKILL');
+    await assert.rejects(
+      resultPromise,
+      (error) => error.name === 'ReviewerOutputLimitError'
+        && error.message === 'Claude output exceeded 10 MiB capture limit',
+    );
+    await assertMissing(directory);
+  } finally {
+    child.close(null, 'SIGKILL');
+    await resultPromise.catch(() => {});
+  }
+});
+
+test('unterminated output-cap child prevents retry and preserves its cwd', async () => {
+  const events = [];
+  const child = controlledChild(events, 'child');
+  let attempts = 0;
+  let directory;
+  let resolveSpawn;
+  const spawned = new Promise((resolve) => { resolveSpawn = resolve; });
+  const resultPromise = runReviewer({
+    prompt: 'packet',
+    timeoutMs: 1_000,
+    retries: 1,
+    launch: (options) => {
+      attempts += 1;
+      directory = options.cwd;
+      if (attempts > 1) return Promise.resolve(COMPLETE_REVIEW);
+      return launchClaude(options, {
+        killGuardMs: 2,
+        spawnImpl: () => {
+          resolveSpawn();
+          return child;
+        },
+      });
+    },
+    validate: (output) => parseProtocolBlock(output, 'brb-review'),
+  });
+
+  try {
+    await spawned;
+    child.stdout.write(Buffer.alloc(10 * 1024 * 1024 + 1, 97));
+    await assert.rejects(
+      resultPromise,
+      (error) => error.name === 'UnterminatedReviewerChildError'
+        && error.message === 'Claude child did not exit after SIGKILL',
+    );
+    assert.equal(attempts, 1);
+    assert.deepEqual(events, ['child:SIGKILL']);
+    await access(directory);
+  } finally {
+    if (typeof directory === 'string' && directory.startsWith(REVIEW_PREFIX)) {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
 });
 
 test('run-claude CLI retries once and writes only normalized validated JSON', async () => {

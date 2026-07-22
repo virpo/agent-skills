@@ -42,6 +42,13 @@ export class UnterminatedReviewerChildError extends Error {
   }
 }
 
+export class ReviewerOutputLimitError extends Error {
+  constructor() {
+    super('Claude output exceeded 10 MiB capture limit');
+    this.name = 'ReviewerOutputLimitError';
+  }
+}
+
 function validateRunOptions({ prompt, launch, validate, timeoutMs, retries }) {
   if (typeof prompt !== 'string' || prompt.trim().length === 0) {
     throw new TypeError('prompt must be a non-empty string');
@@ -91,6 +98,7 @@ export async function runReviewer({
         output = await launch({ cwd: directory, input: prompt, signal: controller.signal });
       } catch (error) {
         if (error instanceof UnterminatedReviewerChildError) throw error;
+        if (error instanceof ReviewerOutputLimitError) throw error;
         if (timedOut) {
           throw new Error(`Reviewer timed out after ${timeoutMs} ms`, { cause: error });
         }
@@ -130,11 +138,16 @@ export function launchClaude(
     const stdout = [];
     const stderr = [];
     let child;
+    let exitCode;
+    let exitSignal;
     let termTimer;
     let killGuardTimer;
-    let terminationError;
+    let termination;
+    let lifecycleCleared = false;
 
     const clearLifecycle = () => {
+      if (lifecycleCleared) return;
+      lifecycleCleared = true;
       clearTimeout(termTimer);
       clearTimeout(killGuardTimer);
       signal?.removeEventListener('abort', abort);
@@ -157,24 +170,40 @@ export function launchClaude(
     const startKillGuard = () => {
       killGuardTimer = setTimeout(unterminated, killGuardMs);
     };
-    const abort = () => {
-      if (settled || terminationError) return;
-      terminationError = new Error('Claude review aborted');
-      terminationError.name = 'AbortError';
-      child.kill('SIGTERM');
+    const sendSignal = (value) => {
+      if (settled) return;
+      termination.killSent = true;
+      try {
+        child.kill(value);
+      } catch (error) {
+        termination.signalError = error;
+      }
+    };
+    const beginTermination = (error, firstSignal) => {
+      if (settled || termination) return;
+      termination = { error, killSent: false, signalError: undefined };
+      sendSignal(firstSignal);
+      if (firstSignal === 'SIGKILL') {
+        startKillGuard();
+        return;
+      }
       termTimer = setTimeout(() => {
         if (settled) return;
-        child.kill('SIGKILL');
+        sendSignal('SIGKILL');
         startKillGuard();
       }, termGraceMs);
     };
+    const abort = () => {
+      const error = new Error('Claude review aborted');
+      error.name = 'AbortError';
+      beginTermination(error, 'SIGTERM');
+    };
     const capture = (target) => (chunk) => {
-      if (settled || terminationError) return;
+      if (settled || termination) return;
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       capturedBytes += bytes.length;
       if (capturedBytes > MAX_CAPTURE_BYTES) {
-        child.kill('SIGKILL');
-        finish(new Error('Claude output exceeded 10 MiB capture limit'));
+        beginTermination(new ReviewerOutputLimitError(), 'SIGKILL');
         return;
       }
       target.push(bytes);
@@ -182,34 +211,32 @@ export function launchClaude(
     const captureStdout = capture(stdout);
     const captureStderr = capture(stderr);
     const childError = (error) => {
-      if (terminationError) {
-        finish(new UnterminatedReviewerChildError(
-          'Claude child lifecycle could not be confirmed after process error',
-        ));
-        return;
-      }
+      if (termination?.killSent) return;
       finish(error);
     };
     const stdinError = (error) => {
-      if (terminationError) return;
+      if (termination?.killSent) return;
       finish(error);
     };
-    const childExit = () => {
-      if (terminationError) finish(terminationError);
+    const childExit = (code, signalValue) => {
+      exitCode = code;
+      exitSignal = signalValue;
     };
     const childClose = (code, closeSignal) => {
-      if (terminationError) {
-        finish(terminationError);
+      if (termination) {
+        finish(termination.error);
         return;
       }
-      if (code === 0) {
+      const finalCode = code ?? exitCode;
+      const finalSignal = closeSignal ?? exitSignal;
+      if (finalCode === 0) {
         finish(undefined, Buffer.concat(stdout).toString('utf8'));
         return;
       }
       const diagnostic = Buffer.concat(stderr).toString('utf8').trim();
-      const reason = code === null
-        ? `signal ${closeSignal ?? 'unknown'}`
-        : `code ${code}`;
+      const reason = finalCode === null || finalCode === undefined
+        ? `signal ${finalSignal ?? 'unknown'}`
+        : `code ${finalCode}`;
       finish(new Error(
         diagnostic.length > 0
           ? `Claude exited with ${reason}: ${diagnostic}`
