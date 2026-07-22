@@ -93,6 +93,13 @@ function findingAnchor(finding) {
   return evidence ? { path: evidence.path, line: evidence.line } : { path: null, line: null };
 }
 
+function visibleText(value) {
+  return value.replace(
+    /<!--(?=\s*blast-radius-buddy-(?:review|finding):)/g,
+    '&lt;!--',
+  );
+}
+
 function escapeMetadataJson(value) {
   // JSON accepts Unicode escapes inside strings. This keeps parsed paths and IDs byte-for-byte
   // intact while preventing any report text from terminating the surrounding HTML comment.
@@ -123,17 +130,17 @@ function formatEvidence(evidence) {
       && item.line > 0)
     .map((item) => {
       const behavior = typeof item.behavior === 'string' && item.behavior.trim().length > 0
-        ? ` — ${item.behavior.trim()}`
+        ? ` — ${visibleText(item.behavior.trim())}`
         : '';
-      return `- Evidence: \`${item.path}:${item.line}\`${behavior}`;
+      return `- Evidence: \`${visibleText(item.path)}:${item.line}\`${behavior}`;
     });
 }
 
 function formatFinding(finding, index) {
   const id = stableFindingId(finding.id, `findings[${index}].id`);
-  const title = nonEmptyString(finding.title, `findings[${index}].title`);
-  const severity = nonEmptyString(finding.severity, `findings[${index}].severity`);
-  const confidence = nonEmptyString(finding.confidence, `findings[${index}].confidence`);
+  const title = visibleText(nonEmptyString(finding.title, `findings[${index}].title`));
+  const severity = visibleText(nonEmptyString(finding.severity, `findings[${index}].severity`));
+  const confidence = visibleText(nonEmptyString(finding.confidence, `findings[${index}].confidence`));
   const lines = [
     `### ${id} · [${severity} / ${confidence}] ${title}`,
     '',
@@ -144,35 +151,39 @@ function formatFinding(finding, index) {
     ['Impact', 'impact'],
   ]) {
     if (typeof finding[field] === 'string' && finding[field].trim().length > 0) {
-      lines.push(`- ${label}: ${finding[field].trim()}`);
+      lines.push(`- ${label}: ${visibleText(finding[field].trim())}`);
     }
   }
   lines.push(...formatEvidence(finding.evidence));
   if (typeof finding.suggestedFix === 'string' && finding.suggestedFix.trim().length > 0) {
-    lines.push(`- Suggested fix: ${finding.suggestedFix.trim()}`);
+    lines.push(`- Suggested fix: ${visibleText(finding.suggestedFix.trim())}`);
   }
   return lines.join('\n');
 }
 
 function formatLedgerEntry(entry) {
-  if (typeof entry === 'string') return `- ${entry}`;
+  if (typeof entry === 'string') return `- ${visibleText(entry)}`;
   if (!plainObject(entry)) return null;
-  const id = typeof entry.id === 'string' && entry.id.length > 0 ? `${entry.id}: ` : '';
+  const id = typeof entry.id === 'string' && entry.id.length > 0
+    ? `${visibleText(entry.id)}: `
+    : '';
   const status = typeof entry.status === 'string' && entry.status.length > 0
-    ? `[${entry.status}] `
+    ? `[${visibleText(entry.status)}] `
     : '';
   const summary = typeof entry.summary === 'string' && entry.summary.trim().length > 0
-    ? entry.summary.trim()
+    ? visibleText(entry.summary.trim())
     : 'Prior feedback';
   const location = typeof entry.path === 'string' && entry.path.length > 0
-    ? ` (\`${entry.path}${Number.isSafeInteger(entry.line) && entry.line > 0 ? `:${entry.line}` : ''}\`)`
+    ? ` (\`${visibleText(entry.path)}${Number.isSafeInteger(entry.line) && entry.line > 0 ? `:${entry.line}` : ''}\`)`
     : '';
   return `- ${id}${status}${summary}${location}`;
 }
 
 function stringItems(value, label) {
   if (!Array.isArray(value)) throw new TypeError(`${label} must be an array`);
-  return value.map((item, index) => nonEmptyString(item, `${label}[${index}]`));
+  return value.map(
+    (item, index) => visibleText(nonEmptyString(item, `${label}[${index}]`)),
+  );
 }
 
 export function buildReviewBody(report) {
@@ -190,9 +201,13 @@ export function buildReviewBody(report) {
   const deferred = stringItems(report.deferred, 'report.deferred');
   if (!plainObject(report.coverage)) throw new TypeError('report.coverage must be an object');
   const coverage = {
-    security: nonEmptyString(report.coverage.security, 'report.coverage.security'),
-    blastRadius: nonEmptyString(report.coverage.blastRadius, 'report.coverage.blastRadius'),
-    featureTruth: nonEmptyString(report.coverage.featureTruth, 'report.coverage.featureTruth'),
+    security: visibleText(nonEmptyString(report.coverage.security, 'report.coverage.security')),
+    blastRadius: visibleText(
+      nonEmptyString(report.coverage.blastRadius, 'report.coverage.blastRadius'),
+    ),
+    featureTruth: visibleText(
+      nonEmptyString(report.coverage.featureTruth, 'report.coverage.featureTruth'),
+    ),
   };
 
   const lines = [
@@ -288,17 +303,6 @@ export function collectChangedLines(diff) {
       expectsNewPath = false;
       continue;
     }
-    if (line.startsWith('--- ')) {
-      flushHunk();
-      currentPath = null;
-      expectsNewPath = true;
-      continue;
-    }
-    if (expectsNewPath) {
-      currentPath = diffPath(line);
-      expectsNewPath = false;
-      continue;
-    }
     if (line.startsWith('@@')) {
       flushHunk();
       const header = currentPath ? hunkHeader(line) : null;
@@ -314,30 +318,42 @@ export function collectChangedLines(diff) {
       }
       continue;
     }
-    if (line.startsWith('Binary files ') || line.startsWith('GIT binary patch')) {
-      flushHunk();
-      currentPath = null;
+    if (hunk) {
+      const prefix = line[0];
+      if (prefix === ' ') {
+        if (hunk.newLine > 0) hunk.lines.push(hunk.newLine);
+        hunk.newLine += 1;
+        hunk.oldSeen += 1;
+        hunk.newSeen += 1;
+      } else if (prefix === '+') {
+        if (hunk.newLine > 0) hunk.lines.push(hunk.newLine);
+        hunk.newLine += 1;
+        hunk.newSeen += 1;
+      } else if (prefix === '-') {
+        hunk.oldSeen += 1;
+      } else if (line !== '\\ No newline at end of file') {
+        hunk.valid = false;
+      }
+      if (hunk.oldSeen > hunk.oldCount || hunk.newSeen > hunk.newCount) {
+        hunk.valid = false;
+      }
+      if (hunk.oldSeen === hunk.oldCount && hunk.newSeen === hunk.newCount) {
+        flushHunk();
+      }
       continue;
     }
-    if (!hunk) continue;
-
-    const prefix = line[0];
-    if (prefix === ' ') {
-      if (hunk.newLine > 0) hunk.lines.push(hunk.newLine);
-      hunk.newLine += 1;
-      hunk.oldSeen += 1;
-      hunk.newSeen += 1;
-    } else if (prefix === '+') {
-      if (hunk.newLine > 0) hunk.lines.push(hunk.newLine);
-      hunk.newLine += 1;
-      hunk.newSeen += 1;
-    } else if (prefix === '-') {
-      hunk.oldSeen += 1;
-    } else if (line !== '\\ No newline at end of file') {
-      hunk.valid = false;
+    if (line.startsWith('--- ')) {
+      currentPath = null;
+      expectsNewPath = true;
+      continue;
     }
-    if (hunk.oldSeen > hunk.oldCount || hunk.newSeen > hunk.newCount) {
-      hunk.valid = false;
+    if (expectsNewPath) {
+      currentPath = diffPath(line);
+      expectsNewPath = false;
+      continue;
+    }
+    if (line.startsWith('Binary files ') || line.startsWith('GIT binary patch')) {
+      currentPath = null;
     }
   }
   flushHunk();
@@ -356,31 +372,37 @@ function validAnchor(evidence, changedLines) {
 
 function inlineBody(finding, anchor) {
   const id = stableFindingId(finding.id);
-  const title = nonEmptyString(finding.title, `${id}.title`);
-  const severity = typeof finding.severity === 'string' ? finding.severity : 'finding';
-  const confidence = typeof finding.confidence === 'string' ? finding.confidence : 'unknown confidence';
+  const title = visibleText(nonEmptyString(finding.title, `${id}.title`));
+  const severity = typeof finding.severity === 'string'
+    ? visibleText(finding.severity)
+    : 'finding';
+  const confidence = typeof finding.confidence === 'string'
+    ? visibleText(finding.confidence)
+    : 'unknown confidence';
   const lines = [`**${id} · [${severity} / ${confidence}] ${title}**`];
   for (const field of ['what', 'why', 'impact']) {
     if (typeof finding[field] === 'string' && finding[field].trim().length > 0) {
-      lines.push('', finding[field].trim());
+      lines.push('', visibleText(finding[field].trim()));
     }
   }
   const behavior = typeof anchor.behavior === 'string' && anchor.behavior.trim().length > 0
-    ? ` — ${anchor.behavior.trim()}`
+    ? ` — ${visibleText(anchor.behavior.trim())}`
     : '';
-  lines.push('', `Evidence: \`${anchor.path}:${anchor.line}\`${behavior}`);
+  lines.push('', `Evidence: \`${visibleText(anchor.path)}:${anchor.line}\`${behavior}`);
   if (typeof finding.suggestedFix === 'string' && finding.suggestedFix.trim().length > 0) {
-    lines.push('', `Suggested fix: ${finding.suggestedFix.trim()}`);
+    lines.push('', `Suggested fix: ${visibleText(finding.suggestedFix.trim())}`);
   }
 
   const sameFile = Array.isArray(finding.evidence)
     && finding.evidence.length > 0
     && finding.evidence.every((item) => plainObject(item) && item.path === anchor.path);
   const suggestedChange = typeof finding.suggestedChange === 'string'
-    ? finding.suggestedChange.trim()
+    ? finding.suggestedChange
     : '';
-  if (finding.mechanical === true && sameFile && suggestedChange.length > 0) {
-    lines.push('', '```suggestion', suggestedChange, '```');
+  if (finding.mechanical === true && sameFile && suggestedChange.trim().length > 0) {
+    const visibleSuggestion = visibleText(suggestedChange);
+    const closingLineBreak = visibleSuggestion.endsWith('\n') ? '' : '\n';
+    lines.push('', `\`\`\`suggestion\n${visibleSuggestion}${closingLineBreak}\`\`\``);
   }
   lines.push('', `<!-- blast-radius-buddy-finding:${id} -->`);
   return lines.join('\n');
