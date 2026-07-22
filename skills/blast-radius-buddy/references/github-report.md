@@ -100,7 +100,7 @@ Use these field rules:
 
 - `verdict` is exactly and case-sensitively one of `Approve`, `Actionable findings`, or `Review completed with uncertainty`.
 - `headSha` is the full 40-character hexadecimal commit ID captured before review.
-- `findings` contains only actionable `critical`, `high`, or `medium` findings. Use `[]` for a clean result. Each finding has a unique stable `BRB001`-style `id`; `confidence` is `high` or `medium`; the descriptive fields are non-empty strings.
+- `findings` contains only actionable `critical`, `high`, or `medium` findings. Use `[]` for a clean result. Each finding has a unique run-local `BRB001`-style `id`; `confidence` is `high` or `medium`; the descriptive fields are non-empty strings. `prepare` derives a durable semantic key from the finding's normalized path, title, and failure description for history matching across reruns.
 - Each `evidence` entry has a repository-relative `path`, positive integer `line`, and non-empty `behavior`. Use a reliable PR-relative new-side changed line when the finding should be inline.
 - `suggestedFix` is non-empty prose. `suggestedChange` is either `null` or the exact replacement text. `mechanical` is a boolean and is `true` only when the replacement meets the safe-suggestion rules below.
 - `priorFeedback` entries use exactly `id`, `status`, `summary`, `path`, and `line`. `validation` and `deferred` are arrays of non-empty strings. Use empty arrays when a section has no entries.
@@ -108,29 +108,48 @@ Use these field rules:
 
 ## Native review
 
-Prepare the review artifacts before submission:
+Write the explicit gate state to `GATES.json` using exactly these fields:
+
+```json
+{
+  "reviewersComplete": true,
+  "reproductionComplete": true,
+  "materialUncertainty": false,
+  "verifierVerdict": "clean",
+  "findings": [],
+  "failedRequiredChecks": [],
+  "headUnchanged": true
+}
+```
+
+`findings` contains the surviving report finding IDs. `verifierVerdict` uses the exact verification verdict. Use `reproductionComplete: true` when selected reproduction completed or none was required. `headUnchanged` records the final exact-SHA check.
+
+Prepare the review artifacts and gate-derived event before submission:
 
 ```bash
 node skills/blast-radius-buddy/scripts/github-review.mjs prepare \
   --report-file REPORT.json \
   --diff-file PR.diff \
+  --gates-file GATES.json \
   --body-output BODY.md \
-  --comments-output COMMENTS.json
+  --comments-output COMMENTS.json \
+  --event-output PREPARED_EVENT.json
 ```
 
-`prepare` is deterministic and does not call GitHub. It consumes the normalized report and captured unified diff, writes a marker-safe report body, anchors only approved actionable findings on valid new-side diff lines, writes stable finding markers into inline comments, and keeps unanchored findings in the body.
+`prepare` is deterministic and does not call GitHub. It strictly validates the normalized report, requires its finding IDs and verdict to agree with the gates, derives the only allowed event, writes a marker-safe report body, anchors only approved actionable findings on valid new-side diff lines, writes durable semantic finding markers into inline comments, and keeps unanchored findings in the body. Extra, missing, malformed, or contradictory report fields stop preparation.
 
-Submit only the prepared artifacts after the event gates pass:
+Submit only those prepared artifacts:
 
 ```bash
 node skills/blast-radius-buddy/scripts/github-review.mjs submit \
   --repo OWNER/REPO \
   --pr NUMBER \
-  --head-sha FULL_HEAD_SHA \
-  --event COMMENT \
+  --prepared-event-file PREPARED_EVENT.json \
   --body-file BODY.md \
   --comments-file COMMENTS.json
 ```
+
+The prepared event artifact binds the full head SHA, derived event, body, and comments with SHA-256 digests. `submit` rejects a separately chosen event, a shortened or changed head, or any body/comment edit after preparation. It never accepts `REQUEST_CHANGES`.
 
 Start the native review with exactly:
 

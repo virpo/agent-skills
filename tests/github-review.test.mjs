@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   buildReviewBody,
   collectChangedLines,
+  findingSemanticKey,
   main,
   partitionInlineFindings,
   prepareReview,
@@ -16,7 +17,7 @@ import { fakeExecute } from './helpers/fake-execute.mjs';
 
 const HEAD_SHA = 'abcdef0123456789abcdef0123456789abcdef01';
 const REVIEW_URL = 'https://github.com/acme/widget/pull/19#pullrequestreview-9';
-const FINDING_MARKER = '<!-- blast-radius-buddy-finding:BRB001 -->';
+const DURABLE_FINDING_MARKER = /<!-- blast-radius-buddy-finding:BRB001:BRBK1_[0-9a-f]{64} -->$/;
 
 const FINDING = {
   id: 'BRB001',
@@ -56,6 +57,35 @@ const REPORT = {
   },
 };
 
+const COMMENT_GATES = {
+  reviewersComplete: true,
+  reproductionComplete: true,
+  materialUncertainty: true,
+  verifierVerdict: 'uphold',
+  findings: [{ id: 'BRB001' }],
+  failedRequiredChecks: [],
+  headUnchanged: true,
+};
+
+const APPROVE_REPORT = {
+  ...structuredClone(REPORT),
+  verdict: 'Approve',
+  findings: [],
+  priorFeedback: [],
+  validation: [],
+  deferred: [],
+};
+
+const APPROVE_GATES = {
+  reviewersComplete: true,
+  reproductionComplete: true,
+  materialUncertainty: false,
+  verifierVerdict: 'clean',
+  findings: [],
+  failedRequiredChecks: [],
+  headUnchanged: true,
+};
+
 function clone(value) {
   return structuredClone(value);
 }
@@ -84,24 +114,84 @@ test('buildReviewBody uses the approved opening and report order', () => {
   }
 });
 
+test('buildReviewBody strictly rejects malformed or contradictory normalized reports', () => {
+  const without = (object, field) => {
+    const copy = clone(object);
+    delete copy[field];
+    return copy;
+  };
+  const invalidReports = [
+    [{ ...clone(REPORT), extra: true }, /unexpected field extra/],
+    [without(REPORT, 'coverage'), /report\.coverage is required/],
+    [{ ...clone(REPORT), findings: [{ ...clone(FINDING), severity: 'nit' }] }, /severity/],
+    [{ ...clone(REPORT), findings: [{ ...clone(FINDING), confidence: 'low' }] }, /confidence/],
+    [{
+      ...clone(REPORT),
+      findings: [{ ...clone(FINDING), evidence: [{ path: 'src/a.ts', line: '1', behavior: 'x' }] }],
+    }, /evidence\[0\]\.line/],
+    [{
+      ...clone(REPORT),
+      findings: [{ ...clone(FINDING), evidence: [{ path: '../outside', line: 1, behavior: 'x' }] }],
+    }, /evidence\[0\]\.path/],
+    [{
+      ...clone(REPORT),
+      findings: [{ ...clone(FINDING), evidence: [{ path: 'src/a.ts', line: 0, behavior: 'x' }] }],
+    }, /evidence\[0\]\.line/],
+    [{ ...clone(APPROVE_REPORT), findings: [clone(FINDING)] }, /Approve.*findings/i],
+    [{ ...clone(APPROVE_REPORT), deferred: ['Unresolved behavior.'] }, /Approve.*deferred/i],
+    [{ ...clone(REPORT), findings: [] }, /Actionable findings.*finding/i],
+    [{ ...clone(APPROVE_REPORT), verdict: 'Review completed with uncertainty' }, /uncertainty.*deferred/i],
+  ];
+
+  for (const [report, error] of invalidReports) {
+    assert.throws(() => buildReviewBody(report), error);
+  }
+});
+
+test('prepareReview derives and hashes a submission event from explicit host gates', () => {
+  const diff = [
+    '--- a/src/paging.ts',
+    '+++ b/src/paging.ts',
+    '@@ -42 +42 @@',
+    '-old line',
+    '+new line',
+  ].join('\n');
+
+  const prepared = prepareReview(clone(REPORT), diff, clone(COMMENT_GATES));
+
+  assert.deepEqual(Object.keys(prepared.eventArtifact).sort(), [
+    'bodySha256', 'commentsSha256', 'event', 'headSha', 'version',
+  ]);
+  assert.equal(prepared.eventArtifact.version, 1);
+  assert.equal(prepared.eventArtifact.headSha, HEAD_SHA);
+  assert.equal(prepared.eventArtifact.event, 'COMMENT');
+  assert.match(prepared.eventArtifact.bodySha256, /^[0-9a-f]{64}$/);
+  assert.match(prepared.eventArtifact.commentsSha256, /^[0-9a-f]{64}$/);
+});
+
+test('prepareReview refuses approval reports when any approval gate fails', () => {
+  for (const gates of [
+    { ...clone(APPROVE_GATES), failedRequiredChecks: ['test'] },
+    { ...clone(APPROVE_GATES), materialUncertainty: true },
+    { ...clone(APPROVE_GATES), headUnchanged: false },
+  ]) {
+    assert.throws(
+      () => prepareReview(clone(APPROVE_REPORT), '', gates),
+      /(?:Approve|marker only|gate|COMMENT)/i,
+    );
+  }
+});
+
 test('buildReviewBody omits empty optional sections and keeps compact metadata safe', () => {
   const title = 'Break --> out -- twice';
   const path = 'src/page--boundary.ts';
-  const rejectedNitTitle = 'Rename this local for style';
   const body = buildReviewBody({
     ...clone(REPORT),
-    verdict: 'Approve',
     findings: [
       {
         ...clone(FINDING),
         title,
         evidence: [{ path, line: 7, behavior: 'safe structural path' }],
-      },
-      {
-        ...clone(FINDING),
-        id: 'BRB002',
-        severity: 'nit',
-        title: rejectedNitTitle,
       },
     ],
     priorFeedback: [],
@@ -113,14 +203,15 @@ test('buildReviewBody omits empty optional sections and keeps compact metadata s
   assert.doesNotMatch(body, /## Validation/);
   assert.doesNotMatch(body, /## Deferred/);
   assert.match(body, /## Coverage/);
-  assert.equal(body.includes(rejectedNitTitle), false);
 
   const metadataMatch = body.match(/<!-- blast-radius-buddy-review:([\s\S]+) -->$/);
   assert.ok(metadataMatch, 'the compact metadata record must end the body');
   assert.equal(metadataMatch[1].includes('--'), false);
-  assert.deepEqual(JSON.parse(metadataMatch[1]), {
+  const parsedMetadata = JSON.parse(metadataMatch[1]);
+  assert.match(parsedMetadata.findings[0].key, /^BRBK1_[0-9a-f]{64}$/);
+  assert.deepEqual(parsedMetadata, {
     headSha: HEAD_SHA,
-    findings: [{ id: 'BRB001', title, path, line: 7 }],
+    findings: [{ id: 'BRB001', key: parsedMetadata.findings[0].key, title, path, line: 7 }],
   });
   assert.equal(metadataMatch[1].includes('suggestedFix'), false);
   assert.equal(metadataMatch[1].includes('behavior'), false);
@@ -296,7 +387,7 @@ test('partitionInlineFindings keeps exact anchors and moves unanchored findings 
   assert.equal(result.inline.length, 1);
   assert.equal(result.inline[0].path, 'src/paging.ts');
   assert.equal(result.inline[0].line, 42);
-  assert.ok(result.inline[0].body.endsWith(FINDING_MARKER));
+  assert.match(result.inline[0].body, DURABLE_FINDING_MARKER);
   assert.deepEqual(result.bodyOnly, [unanchored]);
   assert.equal(result.inline.some(({ line }) => line === 41), false);
 });
@@ -337,7 +428,7 @@ test('partitionInlineFindings emits suggestions only for mechanical single-file 
   for (const comment of inline.slice(1)) {
     assert.doesNotMatch(comment.body, /```suggestion/);
   }
-  assert.ok(inline[0].body.endsWith(FINDING_MARKER));
+  assert.match(inline[0].body, DURABLE_FINDING_MARKER);
 });
 
 test('partitionInlineFindings preserves suggestion indentation and blank lines', () => {
@@ -383,7 +474,7 @@ test('partitionInlineFindings neutralizes injected Buddy markers before the fina
   assert.equal([...comment.body.matchAll(/<!--\s*blast-radius-buddy-finding:/g)].length, 1);
   assert.match(comment.body, /&lt;!-- blast-radius-buddy-review:/);
   assert.match(comment.body, /&lt;!--\nblast-radius-buddy-finding:/);
-  assert.ok(comment.body.endsWith(FINDING_MARKER));
+  assert.match(comment.body, DURABLE_FINDING_MARKER);
 });
 
 test('prepareReview deterministically writes safe body metadata and inline finding markers', () => {
@@ -393,15 +484,13 @@ test('prepareReview deterministically writes safe body metadata and inline findi
     title: 'Deleted behavior still needs a body finding',
     evidence: [{ path: 'src/deleted.ts', line: 8, behavior: 'deleted code path' }],
   };
-  const rejectedNit = {
-    ...clone(FINDING),
-    id: 'BRB003',
-    severity: 'nit',
-    title: 'Rename this local variable',
-  };
   const report = {
     ...clone(REPORT),
-    findings: [FINDING, unanchored, rejectedNit],
+    findings: [FINDING, unanchored],
+  };
+  const gates = {
+    ...clone(COMMENT_GATES),
+    findings: [{ id: 'BRB001' }, { id: 'BRB002' }],
   };
   const diff = [
     'diff --git a/src/paging.ts b/src/paging.ts',
@@ -412,17 +501,61 @@ test('prepareReview deterministically writes safe body metadata and inline findi
     '+return Math.floor((total - 1) / pageSize);',
   ].join('\n');
 
-  const first = prepareReview(report, diff);
-  const second = prepareReview(clone(report), diff);
+  const first = prepareReview(report, diff, gates);
+  const second = prepareReview(clone(report), diff, clone(gates));
 
   assert.deepEqual(second, first);
   assert.match(first.body, /<!-- blast-radius-buddy-review:/);
   assert.match(first.body, /Deleted behavior still needs a body finding/);
-  assert.doesNotMatch(first.body, /Rename this local variable/);
   assert.deepEqual(first.comments.map(({ path, line }) => ({ path, line })), [
     { path: 'src/paging.ts', line: 42 },
   ]);
-  assert.ok(first.comments[0].body.endsWith(FINDING_MARKER));
+  assert.match(first.comments[0].body, DURABLE_FINDING_MARKER);
+});
+
+test('prepareReview links root metadata and inline comments with a durable semantic key', () => {
+  const diff = [
+    '--- a/src/paging.ts',
+    '+++ b/src/paging.ts',
+    '@@ -42 +42 @@',
+    '-old line',
+    '+new line',
+  ].join('\n');
+
+  const prepared = prepareReview(clone(REPORT), diff, clone(COMMENT_GATES));
+  const metadataMatch = prepared.body.match(/<!-- blast-radius-buddy-review:([\s\S]+) -->$/);
+  assert.ok(metadataMatch);
+  const metadata = JSON.parse(metadataMatch[1]);
+  const key = metadata.findings[0].key;
+
+  assert.match(key, /^BRBK1_[0-9a-f]{64}$/);
+  assert.ok(prepared.comments[0].body.endsWith(
+    `<!-- blast-radius-buddy-finding:BRB001:${key} -->`,
+  ));
+});
+
+test('finding semantic keys ignore run-local details but preserve case-sensitive paths', () => {
+  const key = findingSemanticKey(FINDING);
+  const rerun = {
+    ...clone(FINDING),
+    id: 'BRB999',
+    title: `  ${FINDING.title.toUpperCase()}  `,
+    what: FINDING.what.toUpperCase(),
+    evidence: [{
+      path: 'src/paging.ts',
+      line: 99,
+      behavior: 'Different observation from the rerun.',
+    }],
+  };
+
+  assert.equal(findingSemanticKey(rerun), key);
+  assert.notEqual(
+    findingSemanticKey({
+      ...clone(rerun),
+      evidence: [{ ...rerun.evidence[0], path: 'src/Paging.ts' }],
+    }),
+    key,
+  );
 });
 
 test('prepareReview rejects duplicate actionable finding IDs', () => {
@@ -435,13 +568,16 @@ test('prepareReview rejects duplicate actionable finding IDs', () => {
     () => prepareReview({
       ...clone(REPORT),
       findings: [clone(FINDING), duplicate],
-    }, ''),
+    }, '', clone(COMMENT_GATES)),
     /duplicate finding ID BRB001/,
   );
 });
 
 test('submitReview posts only COMMENT or APPROVE with the captured SHA', async () => {
   for (const event of ['COMMENT', 'APPROVE']) {
+    const prepared = event === 'APPROVE'
+      ? prepareReview(clone(APPROVE_REPORT), '', clone(APPROVE_GATES))
+      : prepareReview(clone(REPORT), '', clone(COMMENT_GATES));
     const execute = fakeExecute([{
       stdout: JSON.stringify({ id: 9, html_url: REVIEW_URL }),
     }]);
@@ -449,10 +585,9 @@ test('submitReview posts only COMMENT or APPROVE with the captured SHA', async (
     const result = await submitReview({
       repo: 'acme/widget',
       number: 19,
-      headSha: HEAD_SHA,
-      event,
-      body: 'review body',
-      comments: [],
+      preparedEvent: prepared.eventArtifact,
+      body: prepared.body,
+      comments: prepared.comments,
       execute,
     });
 
@@ -468,7 +603,58 @@ test('submitReview posts only COMMENT or APPROVE with the captured SHA', async (
   }
 });
 
+test('submitReview consumes the prepared event artifact and rejects mismatched artifacts', async () => {
+  const prepared = prepareReview(clone(REPORT), '', clone(COMMENT_GATES));
+  const execute = fakeExecute([{
+    stdout: JSON.stringify({ id: 9, html_url: REVIEW_URL }),
+  }]);
+
+  await submitReview({
+    repo: 'acme/widget',
+    number: 19,
+    preparedEvent: prepared.eventArtifact,
+    body: prepared.body,
+    comments: prepared.comments,
+    execute,
+  });
+  assert.deepEqual(execute.calls[0].args.slice(0, 4), [
+    'api', '--method', 'POST', 'repos/acme/widget/pulls/19/reviews',
+  ]);
+
+  for (const mismatch of [
+    { body: `${prepared.body}\nchanged`, comments: prepared.comments },
+    { body: prepared.body, comments: [{ path: 'src/paging.ts', line: 42, body: 'changed' }] },
+    {
+      body: prepared.body,
+      comments: prepared.comments,
+      preparedEvent: { ...prepared.eventArtifact, event: 'APPROVE' },
+    },
+  ]) {
+    const noExecute = fakeExecute([]);
+    await assert.rejects(
+      submitReview({
+        repo: 'acme/widget',
+        number: 19,
+        preparedEvent: mismatch.preparedEvent ?? prepared.eventArtifact,
+        body: mismatch.body,
+        comments: mismatch.comments,
+        execute: noExecute,
+      }),
+      /prepared event artifact|hash|marker/i,
+    );
+    assert.equal(noExecute.calls.length, 0);
+  }
+});
+
 test('submitReview writes the exact payload and removes its temporary file', async () => {
+  const diff = [
+    '--- a/src/paging.ts',
+    '+++ b/src/paging.ts',
+    '@@ -42 +42 @@',
+    '-old line',
+    '+new line',
+  ].join('\n');
+  const prepared = prepareReview(clone(REPORT), diff, clone(COMMENT_GATES));
   let payload;
   let payloadFile;
   const execute = async (command, args) => {
@@ -481,43 +667,40 @@ test('submitReview writes the exact payload and removes its temporary file', asy
   await submitReview({
     repo: 'acme/widget',
     number: 19,
-    headSha: HEAD_SHA,
-    event: 'COMMENT',
-    body: 'review body',
-    comments: [{
-      path: 'src/paging.ts',
-      line: 42,
-      body: `Finding body\n\n${FINDING_MARKER}`,
-    }],
+    preparedEvent: prepared.eventArtifact,
+    body: prepared.body,
+    comments: prepared.comments,
     execute,
   });
 
   assert.deepEqual(payload, {
     commit_id: HEAD_SHA,
     event: 'COMMENT',
-    body: 'review body',
-    comments: [{
-      path: 'src/paging.ts',
-      line: 42,
-      side: 'RIGHT',
-      body: `Finding body\n\n${FINDING_MARKER}`,
-    }],
+    body: prepared.body,
+    comments: prepared.comments.map((comment) => ({ ...comment, side: 'RIGHT' })),
   });
   await assert.rejects(access(payloadFile));
 });
 
 test('submitReview never fabricates a right-side line for body-only findings', async () => {
-  const { inline, bodyOnly } = partitionInlineFindings(
-    [
-      FINDING,
-      {
-        ...clone(FINDING),
-        id: 'BRB002',
-        evidence: [{ path: 'src/deleted.ts', line: 8, behavior: 'deleted line' }],
-      },
-    ],
-    new Map([['src/paging.ts', new Set([42])]]),
-  );
+  const bodyOnlyFinding = {
+    ...clone(FINDING),
+    id: 'BRB002',
+    evidence: [{ path: 'src/deleted.ts', line: 8, behavior: 'deleted line' }],
+  };
+  const report = { ...clone(REPORT), findings: [clone(FINDING), bodyOnlyFinding] };
+  const gates = {
+    ...clone(COMMENT_GATES),
+    findings: [{ id: 'BRB001' }, { id: 'BRB002' }],
+  };
+  const diff = [
+    '--- a/src/paging.ts',
+    '+++ b/src/paging.ts',
+    '@@ -42 +42 @@',
+    '-old line',
+    '+new line',
+  ].join('\n');
+  const prepared = prepareReview(report, diff, gates);
   let payload;
   const execute = async (_command, args) => {
     payload = JSON.parse(await readFile(args.at(-1), 'utf8'));
@@ -527,33 +710,33 @@ test('submitReview never fabricates a right-side line for body-only findings', a
   await submitReview({
     repo: 'acme/widget',
     number: 19,
-    headSha: HEAD_SHA,
-    event: 'COMMENT',
-    body: 'review body',
-    comments: inline,
+    preparedEvent: prepared.eventArtifact,
+    body: prepared.body,
+    comments: prepared.comments,
     execute,
   });
 
-  assert.equal(bodyOnly.length, 1);
+  assert.match(payload.body, /src\/deleted\.ts:8/);
   assert.deepEqual(payload.comments.map(({ path, line }) => ({ path, line })), [
     { path: 'src/paging.ts', line: 42 },
   ]);
 });
 
 test('submitReview rejects unsafe events and incomplete SHAs before gh', async () => {
-  for (const input of [
-    { event: 'REQUEST_CHANGES', headSha: HEAD_SHA },
-    { event: 'APPROVE', headSha: HEAD_SHA.slice(0, 12) },
+  const prepared = prepareReview(clone(APPROVE_REPORT), '', clone(APPROVE_GATES));
+  for (const preparedEvent of [
+    { ...prepared.eventArtifact, event: 'REQUEST_CHANGES' },
+    { ...prepared.eventArtifact, headSha: HEAD_SHA.slice(0, 12) },
   ]) {
     const execute = fakeExecute([]);
     await assert.rejects(
       submitReview({
         repo: 'acme/widget',
         number: 19,
-        body: 'review body',
-        comments: [],
+        preparedEvent,
+        body: prepared.body,
+        comments: prepared.comments,
         execute,
-        ...input,
       }),
     );
     assert.equal(execute.calls.length, 0);
@@ -561,6 +744,7 @@ test('submitReview rejects unsafe events and incomplete SHAs before gh', async (
 });
 
 test('submitReview cleans its temporary payload after gh fails', async () => {
+  const prepared = prepareReview(clone(APPROVE_REPORT), '', clone(APPROVE_GATES));
   let payloadFile;
   const execute = async (_command, args) => {
     payloadFile = args.at(-1);
@@ -571,10 +755,9 @@ test('submitReview cleans its temporary payload after gh fails', async () => {
     submitReview({
       repo: 'acme/widget',
       number: 19,
-      headSha: HEAD_SHA,
-      event: 'COMMENT',
-      body: 'review body',
-      comments: [],
+      preparedEvent: prepared.eventArtifact,
+      body: prepared.body,
+      comments: prepared.comments,
       execute,
     }),
     /GitHub rejected the review/,
@@ -587,8 +770,11 @@ test('main renders a report file and rejects missing submit files before gh', as
   t.after(() => rm(directory, { recursive: true, force: true }));
   const reportFile = join(directory, 'report.json');
   const outputFile = join(directory, 'body.md');
+  const preparedEventFile = join(directory, 'prepared-event.json');
   const commentsFile = join(directory, 'comments.json');
+  const prepared = prepareReview(clone(REPORT), '', clone(COMMENT_GATES));
   await writeFile(reportFile, JSON.stringify(REPORT), 'utf8');
+  await writeFile(preparedEventFile, JSON.stringify(prepared.eventArtifact), 'utf8');
   await writeFile(commentsFile, '[]', 'utf8');
 
   await main(['render', '--report-file', reportFile, '--output', outputFile]);
@@ -603,8 +789,7 @@ test('main renders a report file and rejects missing submit files before gh', as
       'submit',
       '--repo', 'acme/widget',
       '--pr', '19',
-      '--head-sha', HEAD_SHA,
-      '--event', 'COMMENT',
+      '--prepared-event-file', preparedEventFile,
       '--body-file', join(directory, 'missing-body.md'),
       '--comments-file', commentsFile,
     ], { execute }),
@@ -616,8 +801,10 @@ test('main renders a report file and rejects missing submit files before gh', as
 test('main prepare consumes report and unified diff and writes body plus comments without gh', async () => {
   const reportFile = resolve('/mock/report.json');
   const diffFile = resolve('/mock/pr.diff');
+  const gatesFile = resolve('/mock/gates.json');
   const bodyOutput = resolve('/mock/body.md');
   const commentsOutput = resolve('/mock/comments.json');
+  const eventOutput = resolve('/mock/prepared-event.json');
   const diff = [
     '--- a/src/paging.ts',
     '+++ b/src/paging.ts',
@@ -628,6 +815,7 @@ test('main prepare consumes report and unified diff and writes body plus comment
   const inputs = new Map([
     [reportFile, JSON.stringify(REPORT)],
     [diffFile, diff],
+    [gatesFile, JSON.stringify(COMMENT_GATES)],
   ]);
   const writes = [];
   let executions = 0;
@@ -636,8 +824,10 @@ test('main prepare consumes report and unified diff and writes body plus comment
     'prepare',
     '--report-file', reportFile,
     '--diff-file', diffFile,
+    '--gates-file', gatesFile,
     '--body-output', bodyOutput,
     '--comments-output', commentsOutput,
+    '--event-output', eventOutput,
   ], {
     readFile: async (path) => inputs.get(path),
     writeFile: async (...args) => writes.push(args),
@@ -648,13 +838,17 @@ test('main prepare consumes report and unified diff and writes body plus comment
   });
 
   assert.equal(executions, 0);
-  assert.equal(writes.length, 2);
+  assert.equal(writes.length, 3);
   assert.deepEqual(writes.map(([path, , encoding]) => [path, encoding]), [
     [bodyOutput, 'utf8'],
     [commentsOutput, 'utf8'],
+    [eventOutput, 'utf8'],
   ]);
   assert.match(writes[0][1], /<!-- blast-radius-buddy-review:/);
   const comments = JSON.parse(writes[1][1]);
   assert.equal(comments.length, 1);
-  assert.ok(comments[0].body.endsWith(FINDING_MARKER));
+  assert.match(comments[0].body, DURABLE_FINDING_MARKER);
+  const eventArtifact = JSON.parse(writes[2][1]);
+  assert.equal(eventArtifact.event, 'COMMENT');
+  assert.equal(eventArtifact.headSha, HEAD_SHA);
 });

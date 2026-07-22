@@ -52,6 +52,7 @@ function comment({
   path = 'src/cache.ts',
   line = 9,
   originalLine = null,
+  reviewId = 'R-thread',
 }) {
   return {
     id,
@@ -61,7 +62,7 @@ function comment({
     line,
     originalLine,
     author: { login: 'reviewer' },
-    pullRequestReview: { state: 'CHANGES_REQUESTED' },
+    pullRequestReview: { id: reviewId, state: 'CHANGES_REQUESTED' },
   };
 }
 
@@ -218,6 +219,7 @@ test('loadReviewLedger combines threads, paginated reviews, Buddy metadata, and 
           id: 'C-open',
           body: 'The cache leaks tenant state\n\n<!-- blast-radius-buddy-finding:BRB101 -->',
           url: 'https://example/thread-open',
+          reviewId: 'R-buddy',
         })] },
       },
       {
@@ -551,6 +553,7 @@ test('inline finding marker coalesces a live thread with root review metadata', 
           id: 'C-live',
           body: 'The cache leaks tenant state\n\n<!-- blast-radius-buddy-finding:BRB001 -->',
           url: 'https://example/thread-live',
+          reviewId: 'R-buddy-BRB001',
         })] },
       }],
     }),
@@ -577,13 +580,91 @@ test('inline finding marker coalesces a live thread with root review metadata', 
 
   assert.equal(entries.length, 1);
   assert.equal(entries[0].id, 'BRB001');
-  assert.equal(entries[0].canonicalKey, 'BRB001');
+  assert.equal(entries[0].canonicalKey, 'legacy:R-buddy-BRB001:BRB001');
   assert.equal(entries[0].summary, 'The cache leaks tenant state');
   assert.deepEqual(entries[0].statuses, ['open', 'reported']);
   assert.deepEqual(entries[0].urls, [
     'https://example/thread-live',
     'https://example/review-BRB001',
   ]);
+});
+
+test('unrelated ordinal Buddy IDs from separate legacy reviews remain distinct', async () => {
+  const metadata = (title, path) => ({
+    findings: [{ id: 'BRB001', canonicalKey: 'BRB001', title, path, line: 7 }],
+  });
+  const execute = fakeExecute([
+    makeThreadPage({ nodes: [] }),
+    makeReviewPage({
+      nodes: [
+        {
+          id: 'R-first',
+          body: `<!-- blast-radius-buddy-review:${JSON.stringify(metadata('First issue', 'src/first.ts'))} -->`,
+          url: 'https://example/review-first',
+          state: 'COMMENTED',
+          author: { login: 'buddy' },
+        },
+        {
+          id: 'R-second',
+          body: `<!-- blast-radius-buddy-review:${JSON.stringify(metadata('Second issue', 'src/second.ts'))} -->`,
+          url: 'https://example/review-second',
+          state: 'COMMENTED',
+          author: { login: 'buddy' },
+        },
+      ],
+    }),
+    { stdout: '[[]]' },
+  ]);
+
+  const entries = await loadReviewLedger({
+    repo: 'acme/widget', number: 19, headSha: 'abcdef0', prAuthor: 'author', execute,
+  });
+
+  assert.equal(entries.length, 2);
+  assert.deepEqual(entries.map(({ summary }) => summary), ['First issue', 'Second issue']);
+  assert.notEqual(entries[0].canonicalKey, entries[1].canonicalKey);
+});
+
+test('durable semantic key coalesces its root review and matching inline thread', async () => {
+  const key = `BRBK1_${'a'.repeat(64)}`;
+  const metadata = {
+    findings: [{ id: 'BRB001', key, title: 'Shared issue', path: 'src/shared.ts', line: 9 }],
+  };
+  const execute = fakeExecute([
+    makeThreadPage({
+      nodes: [{
+        id: 'T-shared',
+        isResolved: false,
+        isOutdated: false,
+        resolvedBy: null,
+        comments: { nodes: [comment({
+          id: 'C-shared',
+          body: `Shared issue\n\n<!-- blast-radius-buddy-finding:BRB001:${key} -->`,
+          url: 'https://example/thread-shared',
+          path: 'src/shared.ts',
+          reviewId: 'R-shared',
+        })] },
+      }],
+    }),
+    makeReviewPage({
+      nodes: [{
+        id: 'R-shared',
+        body: `<!-- blast-radius-buddy-review:${JSON.stringify(metadata)} -->`,
+        url: 'https://example/review-shared',
+        state: 'COMMENTED',
+        author: { login: 'buddy' },
+      }],
+    }),
+    { stdout: '[[]]' },
+  ]);
+
+  const entries = await loadReviewLedger({
+    repo: 'acme/widget', number: 19, headSha: 'abcdef0', prAuthor: 'author', execute,
+  });
+
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].canonicalKey, key);
+  assert.deepEqual(entries[0].statuses, ['open', 'reported']);
 });
 
 test('applyReviewAssessments uses only explicit host revalidation transitions', () => {

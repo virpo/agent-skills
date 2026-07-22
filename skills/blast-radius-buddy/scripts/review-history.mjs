@@ -12,6 +12,7 @@ const METADATA_PREFIX = '<!-- blast-radius-buddy-review:';
 const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const SUMMARY_LIMIT = 160;
 const PACKET_LINE_LIMIT = 480;
+const SEMANTIC_KEY_PATTERN = /^BRBK1_[0-9a-f]{64}$/;
 
 const REVIEW_THREADS_QUERY = `
 query ReviewThreads($owner: String!, $name: String!, $number: Int!, $cursor: String) {
@@ -32,7 +33,7 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!, $cursor: Str
               line
               originalLine
               author { login }
-              pullRequestReview { state }
+              pullRequestReview { id state }
             }
           }
         }
@@ -193,10 +194,23 @@ export function classifyThread(thread, prAuthor) {
   return 'resolved';
 }
 
-function inlineFindingKey(body) {
-  if (typeof body !== 'string') return '';
-  const match = body.match(/<!--\s*blast-radius-buddy-finding:([\s\S]*?)-->/);
-  return buddyFindingId(match?.[1]);
+function semanticFindingKey(value) {
+  const normalized = normalizeString(value);
+  return SEMANTIC_KEY_PATTERN.test(normalized) ? normalized : '';
+}
+
+function scopedLegacyKey(reviewId, findingId) {
+  return `legacy:${normalizedText(reviewId, 'unknown-review')}:${findingId}`;
+}
+
+function inlineFindingIdentity(body) {
+  if (typeof body !== 'string') return null;
+  const match = body.match(
+    /<!--\s*blast-radius-buddy-finding:(BRB[0-9]{3,6})(?::(BRBK1_[0-9a-f]{64}))?\s*-->/,
+  );
+  const id = buddyFindingId(match?.[1]);
+  if (!id) return null;
+  return { id, key: semanticFindingKey(match?.[2]) };
 }
 
 function removeInlineFindingMarker(body) {
@@ -208,9 +222,11 @@ function removeInlineFindingMarker(body) {
 function normalizeThread(thread, prAuthor) {
   const root = Array.isArray(thread?.comments?.nodes) ? thread.comments.nodes[0] : undefined;
   const id = normalizedText(thread?.id ?? root?.id, 'unknown-thread');
-  const canonicalKey = inlineFindingKey(root?.body) || id;
+  const identity = inlineFindingIdentity(root?.body);
+  const canonicalKey = identity?.key
+    || (identity ? scopedLegacyKey(root?.pullRequestReview?.id ?? id, identity.id) : id);
   return {
-    id,
+    id: identity?.id ?? id,
     status: classifyThread(thread ?? {}, prAuthor),
     path: structuralPath(root?.path),
     line: root?.line ?? root?.originalLine ?? null,
@@ -267,8 +283,10 @@ function metadataEntries(record, review, source = 'root-review', forcedStatus = 
     .map((finding) => {
       const stableId = buddyFindingId(finding.id);
       if (!stableId) return null;
-      const suppliedCanonicalKey = buddyFindingId(finding.canonicalKey);
-      const canonicalKey = suppliedCanonicalKey || stableId;
+      const legacyId = buddyFindingId(finding.canonicalKey) || stableId;
+      const semanticKey = semanticFindingKey(finding.key);
+      const canonicalKey = semanticKey
+        || scopedLegacyKey(review?.id ?? review?.url ?? review?.html_url, legacyId);
       return {
         id: stableId || canonicalKey,
         status: forcedStatus ?? (finding.status === 'suppressed' ? 'suppressed' : 'reported'),
@@ -376,8 +394,8 @@ function coalesceReviewEntries(entries) {
     if (!existing) {
       byKey.set(canonicalKey, {
         ...entry,
-        id: canonicalKey,
-        ...(entry.canonicalKey ? { canonicalKey } : {}),
+        id: entry.id,
+        canonicalKey,
         statuses: unique(entry.statuses ?? [entry.status]),
         urls: unique(entry.urls ?? [entry.url]),
         sources: unique(entry.sources ?? [entry.source]),

@@ -14,7 +14,7 @@ npx skills add virpo/agent-skills --skill look-hard
 
 ### 🧨 Blast Radius Buddy
 
-Review a GitHub pull request through security, system blast-radius, and feature-truth angles. Validate consequential findings, ignore nits, and submit a native comment or approval without changing the branch.
+Review a GitHub pull request through security, system blast-radius, and feature-truth angles. Validate consequential findings with a host-selected diagnostic in an isolated checkout plus tool-less classification, ignore nits, and submit a gate-derived native comment or approval without changing the branch.
 
 ```bash
 npx skills add virpo/agent-skills --skill blast-radius-buddy

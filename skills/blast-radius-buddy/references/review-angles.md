@@ -53,7 +53,7 @@ Use only `critical`, `high`, or `medium`:
 - `high`: reachable consequential user, data, security, availability, deployment, or compatibility failure;
 - `medium`: observable incorrect behavior, a security or reliability weakness, a significant user-facing regression, or a broken contract in code changed or directly affected by the PR.
 
-Use `high` or `medium` confidence. Support every finding with a concrete mechanism, reachability, impact, and repository-relative evidence. Use a new-side line when available. Set `suggestedChange` and `mechanical` according to the inline-suggestion eligibility in `github-report.md`. Set proof-risk booleans explicitly. The host assigns stable IDs after synthesis.
+Use `high` or `medium` confidence. Support every finding with a concrete mechanism, reachability, impact, and repository-relative evidence. Use a new-side line when available. Set `suggestedChange` and `mechanical` according to the inline-suggestion eligibility in `github-report.md`. Set proof-risk booleans explicitly. The host assigns run-local IDs after synthesis; `github-review.mjs prepare` derives the durable semantic history key.
 
 ## Output contract
 

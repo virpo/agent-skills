@@ -24,16 +24,20 @@ Classify every selected ID exactly once:
 - `unclear`: remove it from actionable findings and mark it `deferred`.
 - `refuted`: remove it and `drop` it from the report.
 
-The host writes the selected IDs, in selection order, to `EXPECTED_IDS.json` as a JSON array such as `["BRB001","BRB002"]`. Bind protocol validation to that host-owned set:
+The host writes the selected IDs, in selection order, to `EXPECTED_IDS.json` as a JSON array such as `["BRB001","BRB002"]`. Run one host-selected diagnostic and bind classification to that host-owned set with the deterministic checkout wrapper documented in `reviewer-prompts.md`:
 
 ```bash
-node skills/blast-radius-buddy/scripts/review-protocol.mjs validate \
-  --kind reproduction \
+node skills/blast-radius-buddy/scripts/reproduction-checkout.mjs classify \
+  --repository REPOSITORY_PATH \
+  --head-sha FULL_HEAD_SHA \
+  --prompt-file REPRODUCTION-PROMPT.md \
   --expected-ids-file EXPECTED_IDS.json \
-  --input REPRODUCTION.txt
+  --evidence-output DIAGNOSTIC-EVIDENCE.json \
+  --output REPRODUCTION.json \
+  -- COMMAND [ARG...]
 ```
 
-`--expected-ids-file` must contain a non-empty list of unique stable IDs. The validator rejects an empty model result, duplicate classifications, any omission, and any extra ID, then emits results in host selection order. Never trust model-returned IDs to define the selected set.
+`--expected-ids-file` must contain a non-empty list of unique run-local IDs. The helper validates it before creating the checkout. It captures the diagnostic's command, arguments, exit code, stdout, and stderr, confirms the checkout stayed clean, and passes that evidence as untrusted data to a fresh tool-less classifier. The validator rejects an empty model result, duplicate classifications, any omission, and any extra ID, then emits results in host selection order. Never trust model-returned IDs to define the selected set.
 
 Return only one fenced `brb-reproduction` block, with no prose before or after it, containing this exact envelope:
 

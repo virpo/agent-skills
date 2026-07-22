@@ -52,8 +52,9 @@ test('documents the native high-signal PR review contract', async () => {
   );
   assert.match(
     prompts,
-    /brb-reproduction.*--expected-ids-file.*600000/is,
+    /reproduction-checkout\.mjs classify.*--expected-ids-file.*--evidence-output.*--output.*--.*COMMAND/is,
   );
+  assert.match(prompts, /captured diagnostic evidence.*untrusted.*tool-less classifier/is);
   assert.match(
     prompts,
     /First-pass recipe[\s\S]*one fenced `brb-review` block, with no prose before or after it/i,
@@ -69,13 +70,20 @@ test('documents the native high-signal PR review contract', async () => {
   assert.match(validation, /clean.*only.*none.*never.*actionable/is);
   assert.match(
     report,
-    /github-review\.mjs prepare.*--report-file.*--diff-file.*--body-output.*--comments-output/is,
+    /github-review\.mjs prepare.*--report-file.*--diff-file.*--gates-file.*--body-output.*--comments-output.*--event-output/is,
   );
+  assert.match(
+    report,
+    /github-review\.mjs submit.*--prepared-event-file.*--body-file.*--comments-file/is,
+  );
+  assert.match(report, /run-local.*BRB001.*durable semantic key/is);
+  assert.match(report, /prepared event artifact.*binds.*head.*event.*body.*comments/is);
   assert.match(report, /prepare.*deterministic.*does not.*GitHub/is);
   assert.doesNotMatch(skill, /repair loop/i);
   assert.ok(skill.trim().split(/\s+/).length < 700, 'SKILL.md must stay below 700 words');
   assert.doesNotMatch(readme, /accepted findings[^.\n]*fix/i);
   assert.match(readme, /does not authorize code edits, commits, pushes/i);
+  assert.match(readme, /host-selected diagnostic.*isolated checkout.*tool-less classification/is);
 });
 
 test('ships every deterministic PR review helper', async () => {

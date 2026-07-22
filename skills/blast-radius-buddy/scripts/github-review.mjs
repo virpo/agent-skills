@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   mkdtemp,
   readFile as readFileDefault,
@@ -11,6 +12,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+
+import { decideReviewEvent } from './review-protocol.mjs';
 
 const execFileAsync = promisify(execFile);
 const OPENING = "🧨 The shake is over; here's what held and what came loose.";
@@ -24,7 +27,20 @@ const ACTIONABLE_SEVERITIES = new Set(['critical', 'high', 'medium']);
 const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const HEAD_SHA_PATTERN = /^[0-9a-f]{40}$/i;
 const FINDING_ID_PATTERN = /^BRB(?:00[1-9]|0[1-9]\d|[1-9]\d{2,5})$/;
-const FINDING_MARKER_PATTERN = /<!-- blast-radius-buddy-finding:BRB(?:00[1-9]|0[1-9]\d|[1-9]\d{2,5}) -->$/;
+const FINDING_MARKER_PATTERN = /<!-- blast-radius-buddy-finding:BRB(?:00[1-9]|0[1-9]\d|[1-9]\d{2,5})(?::BRBK1_[0-9a-f]{64})? -->$/;
+const REPORT_FIELDS = [
+  'verdict', 'headSha', 'findings', 'priorFeedback', 'validation', 'deferred', 'coverage',
+];
+const REPORT_FINDING_FIELDS = [
+  'id', 'severity', 'confidence', 'title', 'what', 'why', 'impact', 'evidence',
+  'suggestedFix', 'suggestedChange', 'mechanical',
+];
+const REPORT_EVIDENCE_FIELDS = ['path', 'line', 'behavior'];
+const PRIOR_FEEDBACK_FIELDS = ['id', 'status', 'summary', 'path', 'line'];
+const COVERAGE_FIELDS = ['security', 'blastRadius', 'featureTruth'];
+const PREPARED_EVENT_FIELDS = [
+  'version', 'headSha', 'event', 'bodySha256', 'commentsSha256',
+];
 
 const defaultExecute = (command, args) => execFileAsync(command, args, {
   encoding: 'utf8',
@@ -33,6 +49,17 @@ const defaultExecute = (command, args) => execFileAsync(command, args, {
 
 function plainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function assertExactFields(value, fields, label) {
+  if (!plainObject(value)) throw new TypeError(`${label} must be an object`);
+  const allowed = new Set(fields);
+  for (const field of fields) {
+    if (!Object.hasOwn(value, field)) throw new TypeError(`${label}.${field} is required`);
+  }
+  for (const field of Object.keys(value)) {
+    if (!allowed.has(field)) throw new TypeError(`${label} has unexpected field ${field}`);
+  }
 }
 
 function nonEmptyString(value, label) {
@@ -51,6 +78,13 @@ function positiveSafeInteger(value, label) {
     throw new TypeError(`${label} must be a positive safe integer`);
   }
   return number;
+}
+
+function positiveSafeIntegerValue(value, label) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${label} must be a positive safe integer`);
+  }
+  return value;
 }
 
 function fullHeadSha(value) {
@@ -84,6 +118,148 @@ function stableFindingId(value, label = 'finding.id') {
   return value;
 }
 
+function enumValue(value, values, label) {
+  if (!values.has(value)) throw new TypeError(`${label} is unsupported`);
+  return value;
+}
+
+function normalizeReportEvidence(value, label) {
+  assertExactFields(value, REPORT_EVIDENCE_FIELDS, label);
+  return {
+    path: repositoryPath(value.path, `${label}.path`),
+    line: positiveSafeIntegerValue(value.line, `${label}.line`),
+    behavior: nonEmptyString(value.behavior, `${label}.behavior`),
+  };
+}
+
+function normalizeReportFinding(value, index) {
+  const label = `report.findings[${index}]`;
+  assertExactFields(value, REPORT_FINDING_FIELDS, label);
+  if (!Array.isArray(value.evidence) || value.evidence.length === 0) {
+    throw new TypeError(`${label}.evidence must be a non-empty array`);
+  }
+  const suggestedChange = value.suggestedChange === null
+    ? null
+    : nonEmptyString(value.suggestedChange, `${label}.suggestedChange`);
+  if (typeof value.mechanical !== 'boolean') {
+    throw new TypeError(`${label}.mechanical must be a boolean`);
+  }
+  const evidence = value.evidence.map(
+    (item, evidenceIndex) => normalizeReportEvidence(item, `${label}.evidence[${evidenceIndex}]`),
+  );
+  if (value.mechanical && suggestedChange === null) {
+    throw new TypeError(`${label}.suggestedChange is required when mechanical is true`);
+  }
+  if (value.mechanical && new Set(evidence.map(({ path }) => path)).size !== 1) {
+    throw new TypeError(`${label}.mechanical suggestion must affect one evidence path`);
+  }
+  return {
+    id: stableFindingId(value.id, `${label}.id`),
+    severity: enumValue(value.severity, ACTIONABLE_SEVERITIES, `${label}.severity`),
+    confidence: enumValue(value.confidence, new Set(['high', 'medium']), `${label}.confidence`),
+    title: nonEmptyString(value.title, `${label}.title`),
+    what: nonEmptyString(value.what, `${label}.what`),
+    why: nonEmptyString(value.why, `${label}.why`),
+    impact: nonEmptyString(value.impact, `${label}.impact`),
+    evidence,
+    suggestedFix: nonEmptyString(value.suggestedFix, `${label}.suggestedFix`),
+    suggestedChange,
+    mechanical: value.mechanical,
+  };
+}
+
+function normalizePriorFeedback(value, index) {
+  const label = `report.priorFeedback[${index}]`;
+  assertExactFields(value, PRIOR_FEEDBACK_FIELDS, label);
+  const path = value.path === null ? null : repositoryPath(value.path, `${label}.path`);
+  const line = value.line === null
+    ? null
+    : positiveSafeIntegerValue(value.line, `${label}.line`);
+  if ((path === null) !== (line === null)) {
+    throw new TypeError(`${label}.path and line must both be null or both be present`);
+  }
+  return {
+    id: nonEmptyString(value.id, `${label}.id`),
+    status: nonEmptyString(value.status, `${label}.status`),
+    summary: nonEmptyString(value.summary, `${label}.summary`),
+    path,
+    line,
+  };
+}
+
+function normalizeStringArray(value, label) {
+  if (!Array.isArray(value)) throw new TypeError(`${label} must be an array`);
+  return value.map((item, index) => nonEmptyString(item, `${label}[${index}]`));
+}
+
+export function validateNormalizedReport(value) {
+  assertExactFields(value, REPORT_FIELDS, 'report');
+  const verdict = enumValue(value.verdict, VERDICTS, 'report.verdict');
+  const headSha = fullHeadSha(value.headSha);
+  if (!Array.isArray(value.findings)) throw new TypeError('report.findings must be an array');
+  if (!Array.isArray(value.priorFeedback)) {
+    throw new TypeError('report.priorFeedback must be an array');
+  }
+  const findings = value.findings.map(normalizeReportFinding);
+  const findingIds = new Set();
+  for (const finding of findings) {
+    if (findingIds.has(finding.id)) throw new TypeError(`duplicate finding ID ${finding.id}`);
+    findingIds.add(finding.id);
+  }
+  const deferred = normalizeStringArray(value.deferred, 'report.deferred');
+  if (verdict === 'Approve' && findings.length > 0) {
+    throw new TypeError('Approve report must not contain findings');
+  }
+  if (verdict === 'Approve' && deferred.length > 0) {
+    throw new TypeError('Approve report must not contain deferred uncertainty');
+  }
+  if (verdict === 'Actionable findings' && findings.length === 0) {
+    throw new TypeError('Actionable findings report requires at least one finding');
+  }
+  if (verdict === 'Review completed with uncertainty'
+    && (findings.length > 0 || deferred.length === 0)) {
+    throw new TypeError(
+      'Review completed with uncertainty requires no findings and at least one deferred item',
+    );
+  }
+  assertExactFields(value.coverage, COVERAGE_FIELDS, 'report.coverage');
+  return {
+    verdict,
+    headSha,
+    findings,
+    priorFeedback: value.priorFeedback.map(normalizePriorFeedback),
+    validation: normalizeStringArray(value.validation, 'report.validation'),
+    deferred,
+    coverage: {
+      security: nonEmptyString(value.coverage.security, 'report.coverage.security'),
+      blastRadius: nonEmptyString(value.coverage.blastRadius, 'report.coverage.blastRadius'),
+      featureTruth: nonEmptyString(value.coverage.featureTruth, 'report.coverage.featureTruth'),
+    },
+  };
+}
+
+function semanticText(value) {
+  return typeof value === 'string'
+    ? value.normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase()
+    : '';
+}
+
+export function findingSemanticKey(finding) {
+  if (!plainObject(finding)) throw new TypeError('finding must be an object');
+  const paths = Array.isArray(finding.evidence)
+    ? [...new Set(finding.evidence
+      .filter(plainObject)
+      .map(({ path }) => (typeof path === 'string' ? path : ''))
+      .filter((path) => path.length > 0))].sort()
+    : [];
+  const identity = JSON.stringify({
+    paths,
+    title: semanticText(finding.title),
+    what: semanticText(finding.what),
+  });
+  return `BRBK1_${createHash('sha256').update(identity).digest('hex')}`;
+}
+
 function findingAnchor(finding) {
   if (!Array.isArray(finding?.evidence)) return { path: null, line: null };
   const evidence = finding.evidence.find((item) => plainObject(item)
@@ -113,6 +289,7 @@ function metadataFor(headSha, findings) {
       const { path, line } = findingAnchor(finding);
       return {
         id: stableFindingId(finding.id, `findings[${index}].id`),
+        key: findingSemanticKey(finding),
         title: nonEmptyString(finding.title, `findings[${index}].title`),
         path,
         line,
@@ -187,39 +364,25 @@ function stringItems(value, label) {
 }
 
 export function buildReviewBody(report) {
-  if (!plainObject(report)) throw new TypeError('report must be an object');
-  if (!VERDICTS.has(report.verdict)) throw new TypeError('report.verdict is unsupported');
-  const headSha = fullHeadSha(report.headSha);
-  if (!Array.isArray(report.findings)) throw new TypeError('report.findings must be an array');
-  const findings = report.findings.filter(
-    (finding) => plainObject(finding) && ACTIONABLE_SEVERITIES.has(finding.severity),
-  );
-  const findingIds = new Set();
-  findings.forEach((finding, index) => {
-    const id = stableFindingId(finding.id, `findings[${index}].id`);
-    if (findingIds.has(id)) throw new TypeError(`duplicate finding ID ${id}`);
-    findingIds.add(id);
-  });
-  if (!Array.isArray(report.priorFeedback)) {
-    throw new TypeError('report.priorFeedback must be an array');
-  }
-  const validation = stringItems(report.validation, 'report.validation');
-  const deferred = stringItems(report.deferred, 'report.deferred');
-  if (!plainObject(report.coverage)) throw new TypeError('report.coverage must be an object');
+  const normalized = validateNormalizedReport(report);
+  const { findings } = normalized;
+  const headSha = normalized.headSha;
+  const validation = stringItems(normalized.validation, 'report.validation');
+  const deferred = stringItems(normalized.deferred, 'report.deferred');
   const coverage = {
-    security: visibleText(nonEmptyString(report.coverage.security, 'report.coverage.security')),
+    security: visibleText(normalized.coverage.security),
     blastRadius: visibleText(
-      nonEmptyString(report.coverage.blastRadius, 'report.coverage.blastRadius'),
+      normalized.coverage.blastRadius,
     ),
     featureTruth: visibleText(
-      nonEmptyString(report.coverage.featureTruth, 'report.coverage.featureTruth'),
+      normalized.coverage.featureTruth,
     ),
   };
 
   const lines = [
     OPENING,
     '',
-    `**Verdict:** ${report.verdict}`,
+    `**Verdict:** ${normalized.verdict}`,
     `**Reviewed head:** \`${headSha}\``,
   ];
 
@@ -231,7 +394,7 @@ export function buildReviewBody(report) {
     });
   }
 
-  const priorFeedback = report.priorFeedback.map(formatLedgerEntry).filter(Boolean);
+  const priorFeedback = normalized.priorFeedback.map(formatLedgerEntry).filter(Boolean);
   if (priorFeedback.length > 0) {
     lines.push('', '## Prior feedback', '', ...priorFeedback);
   }
@@ -409,6 +572,7 @@ function validAnchor(evidence, changedLines) {
 
 function inlineBody(finding, anchor) {
   const id = stableFindingId(finding.id);
+  const key = findingSemanticKey(finding);
   const title = visibleText(nonEmptyString(finding.title, `${id}.title`));
   const severity = typeof finding.severity === 'string'
     ? visibleText(finding.severity)
@@ -441,7 +605,7 @@ function inlineBody(finding, anchor) {
     const closingLineBreak = visibleSuggestion.endsWith('\n') ? '' : '\n';
     lines.push('', `\`\`\`suggestion\n${visibleSuggestion}${closingLineBreak}\`\`\``);
   }
-  lines.push('', `<!-- blast-radius-buddy-finding:${id} -->`);
+  lines.push('', `<!-- blast-radius-buddy-finding:${id}:${key} -->`);
   return lines.join('\n');
 }
 
@@ -470,20 +634,52 @@ export function partitionInlineFindings(findings, changedLines) {
   return { inline, bodyOnly };
 }
 
-export function prepareReview(report, diff) {
-  const body = buildReviewBody(report);
-  const findings = report.findings.filter(
-    (finding) => plainObject(finding) && ACTIONABLE_SEVERITIES.has(finding.severity),
-  );
+export function prepareReview(report, diff, gates) {
+  const normalized = validateNormalizedReport(report);
+  const event = decideReviewEvent(gates);
+  const reportIds = normalized.findings.map(({ id }) => id).toSorted();
+  const gateIds = gates.findings.map((finding, index) => (
+    stableFindingId(finding.id, `gates.findings[${index}].id`)
+  )).toSorted();
+  if (JSON.stringify(reportIds) !== JSON.stringify(gateIds)) {
+    throw new TypeError('report findings must match gate findings');
+  }
+  if ((event === 'APPROVE') !== (normalized.verdict === 'Approve')) {
+    throw new TypeError(`Report verdict ${normalized.verdict} contradicts gate event ${event}`);
+  }
+  if (normalized.verdict === 'Review completed with uncertainty'
+    && gates.materialUncertainty !== true) {
+    throw new TypeError('Uncertainty report requires the material uncertainty gate');
+  }
+  const body = buildReviewBody(normalized);
+  const findings = normalized.findings;
   const changedLines = collectChangedLines(diff);
   const { inline: comments } = partitionInlineFindings(findings, changedLines);
-  return { body, comments };
+  const eventArtifact = {
+    version: 1,
+    headSha: normalized.headSha,
+    event,
+    bodySha256: preparedContentHash(normalized.headSha, event, 'body', body),
+    commentsSha256: preparedContentHash(
+      normalized.headSha,
+      event,
+      'comments',
+      `${JSON.stringify(comments)}\n`,
+    ),
+  };
+  return { body, comments, eventArtifact };
+}
+
+function preparedContentHash(headSha, event, kind, contents) {
+  return createHash('sha256')
+    .update(`1\0${headSha}\0${event}\0${kind}\0${contents}`)
+    .digest('hex');
 }
 
 function validateComment(comment, index) {
-  if (!plainObject(comment)) throw new TypeError(`comments[${index}] must be an object`);
+  assertExactFields(comment, ['path', 'line', 'body'], `comments[${index}]`);
   const path = repositoryPath(comment.path, `comments[${index}].path`);
-  const line = positiveSafeInteger(comment.line, `comments[${index}].line`);
+  const line = positiveSafeIntegerValue(comment.line, `comments[${index}].line`);
   const body = nonEmptyString(comment.body, `comments[${index}].body`);
   if (!FINDING_MARKER_PATTERN.test(body)) {
     throw new TypeError(`comments[${index}].body must end with a stable finding marker`);
@@ -491,23 +687,51 @@ function validateComment(comment, index) {
   return { path, line, side: 'RIGHT', body };
 }
 
-function validateSubmission({ repo, number, headSha, event, body, comments, execute }) {
+function validatePreparedEvent(value) {
+  assertExactFields(value, PREPARED_EVENT_FIELDS, 'prepared event artifact');
+  if (value.version !== 1) throw new TypeError('prepared event artifact version is unsupported');
+  const headSha = fullHeadSha(value.headSha);
+  const event = enumValue(value.event, EVENTS, 'prepared event artifact.event');
+  for (const field of ['bodySha256', 'commentsSha256']) {
+    if (typeof value[field] !== 'string' || !/^[0-9a-f]{64}$/.test(value[field])) {
+      throw new TypeError(`prepared event artifact.${field} must be a SHA-256 digest`);
+    }
+  }
+  return { ...value, headSha, event };
+}
+
+function validateSubmission({ repo, number, preparedEvent, body, comments, execute }) {
   if (typeof repo !== 'string' || !REPO_PATTERN.test(repo)) {
     throw new TypeError('repo must use OWNER/REPO format');
   }
   const validatedNumber = positiveSafeInteger(number, 'number');
-  const validatedHeadSha = fullHeadSha(headSha);
-  if (!EVENTS.has(event)) throw new TypeError('event must be COMMENT or APPROVE');
+  const artifact = validatePreparedEvent(preparedEvent);
   const validatedBody = nonEmptyString(body, 'body');
   if (!Array.isArray(comments)) throw new TypeError('comments must be an array');
   if (typeof execute !== 'function') throw new TypeError('execute must be a function');
+  const normalizedComments = comments.map(validateComment);
+  const bodySha256 = preparedContentHash(
+    artifact.headSha,
+    artifact.event,
+    'body',
+    validatedBody,
+  );
+  const commentsSha256 = preparedContentHash(
+    artifact.headSha,
+    artifact.event,
+    'comments',
+    `${JSON.stringify(comments)}\n`,
+  );
+  if (bodySha256 !== artifact.bodySha256 || commentsSha256 !== artifact.commentsSha256) {
+    throw new TypeError('Prepared event artifact does not match review body or comments');
+  }
   return {
     repo,
     number: validatedNumber,
-    headSha: validatedHeadSha,
-    event,
+    headSha: artifact.headSha,
+    event: artifact.event,
     body: validatedBody,
-    comments: comments.map(validateComment),
+    comments: normalizedComments,
   };
 }
 
@@ -531,8 +755,7 @@ function parseReviewResponse(result) {
 export async function submitReview({
   repo,
   number,
-  headSha,
-  event,
+  preparedEvent,
   body,
   comments,
   execute = defaultExecute,
@@ -540,8 +763,7 @@ export async function submitReview({
   const validated = validateSubmission({
     repo,
     number,
-    headSha,
-    event,
+    preparedEvent,
     body,
     comments,
     execute,
@@ -574,9 +796,9 @@ export async function submitReview({
 function usage() {
   return [
     'Usage:',
-    '  github-review.mjs prepare --report-file REPORT.json --diff-file PR.diff --body-output BODY.md --comments-output COMMENTS.json',
+    '  github-review.mjs prepare --report-file REPORT.json --diff-file PR.diff --gates-file GATES.json --body-output BODY.md --comments-output COMMENTS.json --event-output PREPARED_EVENT.json',
     '  github-review.mjs render --report-file REPORT.json --output BODY.md',
-    '  github-review.mjs submit --repo OWNER/REPO --pr NUMBER --head-sha SHA --event COMMENT|APPROVE --body-file BODY.md --comments-file COMMENTS.json',
+    '  github-review.mjs submit --repo OWNER/REPO --pr NUMBER --prepared-event-file PREPARED_EVENT.json --body-file BODY.md --comments-file COMMENTS.json',
   ].join('\n');
 }
 
@@ -620,20 +842,28 @@ export async function main(args, dependencies = {}) {
   if (command === 'prepare') {
     const options = readOptions(
       rest,
-      new Set(['report-file', 'diff-file', 'body-output', 'comments-output']),
+      new Set([
+        'report-file', 'diff-file', 'gates-file',
+        'body-output', 'comments-output', 'event-output',
+      ]),
     );
     const reportFile = resolve(requireOption(options, 'report-file'));
     const diffFile = resolve(requireOption(options, 'diff-file'));
+    const gatesFile = resolve(requireOption(options, 'gates-file'));
     const bodyOutput = resolve(requireOption(options, 'body-output'));
     const commentsOutput = resolve(requireOption(options, 'comments-output'));
-    const [reportText, diff] = await Promise.all([
+    const eventOutput = resolve(requireOption(options, 'event-output'));
+    const [reportText, diff, gatesText] = await Promise.all([
       readFile(reportFile, 'utf8'),
       readFile(diffFile, 'utf8'),
+      readFile(gatesFile, 'utf8'),
     ]);
     const report = parseJsonFile(reportText, reportFile);
-    const result = prepareReview(report, diff);
+    const gates = parseJsonFile(gatesText, gatesFile);
+    const result = prepareReview(report, diff, gates);
     await writeFile(bodyOutput, result.body, 'utf8');
     await writeFile(commentsOutput, `${JSON.stringify(result.comments)}\n`, 'utf8');
+    await writeFile(eventOutput, `${JSON.stringify(result.eventArtifact)}\n`, 'utf8');
     return result;
   }
 
@@ -649,17 +879,22 @@ export async function main(args, dependencies = {}) {
   if (command === 'submit') {
     const options = readOptions(
       rest,
-      new Set(['repo', 'pr', 'head-sha', 'event', 'body-file', 'comments-file']),
+      new Set(['repo', 'pr', 'prepared-event-file', 'body-file', 'comments-file']),
     );
+    const preparedEventFile = resolve(requireOption(options, 'prepared-event-file'));
     const bodyFile = resolve(requireOption(options, 'body-file'));
     const commentsFile = resolve(requireOption(options, 'comments-file'));
-    const body = await readFile(bodyFile, 'utf8');
-    const comments = parseJsonFile(await readFile(commentsFile, 'utf8'), commentsFile);
+    const [preparedEventText, body, commentsText] = await Promise.all([
+      readFile(preparedEventFile, 'utf8'),
+      readFile(bodyFile, 'utf8'),
+      readFile(commentsFile, 'utf8'),
+    ]);
+    const preparedEvent = parseJsonFile(preparedEventText, preparedEventFile);
+    const comments = parseJsonFile(commentsText, commentsFile);
     const result = await submitReview({
       repo: requireOption(options, 'repo'),
       number: requireOption(options, 'pr'),
-      headSha: requireOption(options, 'head-sha'),
-      event: requireOption(options, 'event'),
+      preparedEvent,
       body,
       comments,
       execute,
