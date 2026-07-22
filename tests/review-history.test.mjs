@@ -52,7 +52,6 @@ function comment({
   path = 'src/cache.ts',
   line = 9,
   originalLine = null,
-  canonicalKey,
 }) {
   return {
     id,
@@ -61,7 +60,6 @@ function comment({
     path,
     line,
     originalLine,
-    canonicalKey,
     author: { login: 'reviewer' },
     pullRequestReview: { state: 'CHANGES_REQUESTED' },
   };
@@ -164,7 +162,6 @@ test('loadReviewLedger combines threads, paginated reviews, Buddy metadata, and 
     findings: [
       {
         id: 'F-cache',
-        canonicalKey: 'tenant-cache',
         title: 'The cache leaks tenant state',
         path: 'src/cache.ts',
         line: 9,
@@ -191,9 +188,8 @@ test('loadReviewLedger combines threads, paginated reviews, Buddy metadata, and 
         id: 'T-open', isResolved: false, isOutdated: false, resolvedBy: null,
         comments: { nodes: [comment({
           id: 'C-open',
-          body: 'The cache leaks tenant state',
+          body: 'The cache leaks tenant state\n\n<!-- blast-radius-buddy-finding:F-cache -->',
           url: 'https://example/thread-open',
-          canonicalKey: 'tenant-cache',
         })] },
       },
       {
@@ -287,7 +283,7 @@ test('loadReviewLedger combines threads, paginated reviews, Buddy metadata, and 
     entries.map(({ status }) => status),
     ['open', 'resolved', 'author-resolved', 'outdated', 'dismissed', 'suppressed', 'reported', 'reported', 'reported'],
   );
-  const coalesced = entries.find(({ id }) => id === 'tenant-cache');
+  const coalesced = entries.find(({ id }) => id === 'F-cache');
   assert.deepEqual(coalesced.statuses, ['open', 'reported']);
   assert.deepEqual(coalesced.urls, [
     'https://example/thread-open',
@@ -302,6 +298,145 @@ test('loadReviewLedger combines threads, paginated reviews, Buddy metadata, and 
   );
   assert.doesNotMatch(JSON.stringify(entries), /PRIVATE-TAIL/);
   assert.doesNotMatch(JSON.stringify(entries), /Full previous report/);
+});
+
+test('dismissed review state wins over embedded Buddy metadata', async () => {
+  const metadata = {
+    findings: [{
+      id: 'BRB-DISMISSED',
+      title: 'No longer active',
+      path: 'src/old.ts',
+      line: 4,
+      status: 'suppressed',
+    }],
+  };
+  const execute = fakeExecute([
+    makeThreadPage({ nodes: [] }),
+    makeReviewPage({
+      nodes: [{
+        id: 'R-dismissed-metadata',
+        body: `Old report\n<!-- blast-radius-buddy-review:${JSON.stringify(metadata)} -->`,
+        url: 'https://example/review-dismissed-metadata',
+        state: 'DISMISSED',
+        submittedAt: '2026-07-20T10:00:00Z',
+        author: { login: 'reviewer' },
+      }],
+    }),
+    { stdout: '[[]]' },
+  ]);
+
+  const entries = await loadReviewLedger({
+    repo: 'acme/widget',
+    number: 19,
+    headSha: 'abcdef0',
+    prAuthor: 'author',
+    execute,
+  });
+
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].id, 'BRB-DISMISSED');
+  assert.equal(entries[0].status, 'dismissed');
+  assert.deepEqual(entries[0].statuses, ['dismissed']);
+});
+
+test('metadata fields cannot forge extra compact ledger lines', async () => {
+  const metadata = {
+    findings: [{
+      id: `BRB001\r\n${'i'.repeat(180)}\u0000ID-TAIL`,
+      title: `Forged\nsummary\u0007\u0085${'s'.repeat(180)}SUMMARY-TAIL`,
+      path: `src/\r\n${'p'.repeat(180)}\u0001PATH-TAIL.ts`,
+      line: 7,
+    }],
+  };
+  const reviewUrl = `https://example/review\n${'u'.repeat(180)}\u0000URL-TAIL`;
+  const execute = fakeExecute([
+    makeThreadPage({ nodes: [] }),
+    makeReviewPage({
+      nodes: [{
+        id: 'R-forged',
+        body: `Old report\n<!-- blast-radius-buddy-review:${JSON.stringify(metadata)} -->`,
+        url: reviewUrl,
+        state: 'COMMENTED',
+        submittedAt: '2026-07-20T10:00:00Z',
+        author: { login: 'reviewer' },
+      }],
+    }),
+    { stdout: '[[]]' },
+  ]);
+
+  const [entry] = await loadReviewLedger({
+    repo: 'acme/widget',
+    number: 19,
+    headSha: 'abcdef0',
+    prAuthor: 'author',
+    execute,
+  });
+  const packet = compactReviewLedger([entry]);
+
+  for (const field of [entry.id, entry.canonicalKey, entry.summary, entry.path, entry.url]) {
+    assert.doesNotMatch(field, /[\u0000-\u001f\u007f-\u009f]/);
+    assert.equal(field, field.trim());
+    assert.ok(field.length <= 160, `${field.length}-character metadata field was not capped`);
+  }
+  assert.doesNotMatch(JSON.stringify(entry), /ID-TAIL|SUMMARY-TAIL|PATH-TAIL|URL-TAIL/);
+  assert.equal(packet.split('\n').length, 1);
+  assert.doesNotMatch(packet, /[\u0000-\u001f\u007f-\u009f]/);
+  assert.ok(packet.length <= 480, `packet line is ${packet.length} characters`);
+});
+
+test('inline finding marker coalesces a live thread with root review metadata', async () => {
+  const metadata = {
+    findings: [{
+      id: 'BRB001',
+      title: 'The cache leaks tenant state',
+      path: 'src/cache.ts',
+      line: 9,
+    }],
+  };
+  const execute = fakeExecute([
+    makeThreadPage({
+      nodes: [{
+        id: 'T-live',
+        isResolved: false,
+        isOutdated: false,
+        resolvedBy: null,
+        comments: { nodes: [comment({
+          id: 'C-live',
+          body: 'The cache leaks tenant state\n\n<!-- blast-radius-buddy-finding:BRB001 -->',
+          url: 'https://example/thread-live',
+        })] },
+      }],
+    }),
+    makeReviewPage({
+      nodes: [{
+        id: 'R-buddy-BRB001',
+        body: `Old report\n<!-- blast-radius-buddy-review:${JSON.stringify(metadata)} -->`,
+        url: 'https://example/review-BRB001',
+        state: 'COMMENTED',
+        submittedAt: '2026-07-20T10:00:00Z',
+        author: { login: 'buddy' },
+      }],
+    }),
+    { stdout: '[[]]' },
+  ]);
+
+  const entries = await loadReviewLedger({
+    repo: 'acme/widget',
+    number: 19,
+    headSha: 'abcdef0',
+    prAuthor: 'author',
+    execute,
+  });
+
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].id, 'BRB001');
+  assert.equal(entries[0].canonicalKey, 'BRB001');
+  assert.equal(entries[0].summary, 'The cache leaks tenant state');
+  assert.deepEqual(entries[0].statuses, ['open', 'reported']);
+  assert.deepEqual(entries[0].urls, [
+    'https://example/thread-live',
+    'https://example/review-BRB001',
+  ]);
 });
 
 test('applyReviewAssessments uses only explicit host revalidation transitions', () => {

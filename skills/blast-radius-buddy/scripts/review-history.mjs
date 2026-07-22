@@ -100,13 +100,20 @@ function parseJson(result, label) {
 }
 
 function collapseWhitespace(value) {
-  return String(value ?? '').replace(/\s+/g, ' ').trim();
+  return String(value ?? '')
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function shortSummary(value, fallback = 'Prior review feedback') {
   const collapsed = collapseWhitespace(value) || fallback;
   if (collapsed.length <= SUMMARY_LIMIT) return collapsed;
   return `${collapsed.slice(0, SUMMARY_LIMIT - 3).trimEnd()}...`;
+}
+
+function metadataField(value) {
+  return shortSummary(value, '');
 }
 
 function unique(values) {
@@ -162,18 +169,31 @@ export function classifyThread(thread, prAuthor) {
   return 'resolved';
 }
 
+function inlineFindingKey(body) {
+  if (typeof body !== 'string') return '';
+  const match = body.match(/<!--\s*blast-radius-buddy-finding:([\s\S]*?)-->/);
+  return metadataField(match?.[1]);
+}
+
+function removeInlineFindingMarker(body) {
+  return typeof body === 'string'
+    ? body.replace(/<!--\s*blast-radius-buddy-finding:[\s\S]*?-->/g, '')
+    : body;
+}
+
 function normalizeThread(thread, prAuthor) {
   const root = Array.isArray(thread?.comments?.nodes) ? thread.comments.nodes[0] : undefined;
   const id = String(thread?.id ?? root?.id ?? 'unknown-thread');
+  const canonicalKey = inlineFindingKey(root?.body) || id;
   return {
     id,
     status: classifyThread(thread ?? {}, prAuthor),
     path: root?.path ?? null,
     line: root?.line ?? root?.originalLine ?? null,
-    summary: shortSummary(root?.body, 'Review thread'),
+    summary: shortSummary(removeInlineFindingMarker(root?.body), 'Review thread'),
     url: root?.url ?? null,
     source: 'review-thread',
-    ...(root?.canonicalKey ? { canonicalKey: String(root.canonicalKey) } : {}),
+    canonicalKey,
   };
 }
 
@@ -216,23 +236,22 @@ function parseBuddyMetadata(body) {
   return records;
 }
 
-function metadataEntries(record, review, source = 'root-review') {
+function metadataEntries(record, review, source = 'root-review', forcedStatus = null) {
   if (!Array.isArray(record?.findings)) return [];
   return record.findings
     .filter((finding) => finding && typeof finding === 'object')
     .map((finding, index) => {
-      const canonicalKey = typeof finding.canonicalKey === 'string' && finding.canonicalKey
-        ? finding.canonicalKey
-        : typeof finding.id === 'string' && finding.id
-          ? finding.id
-          : `${review.id}:finding:${index + 1}`;
+      const stableId = metadataField(finding.id);
+      const suppliedCanonicalKey = metadataField(finding.canonicalKey);
+      const fallbackId = metadataField(`${review.id}:finding:${index + 1}`);
+      const canonicalKey = suppliedCanonicalKey || stableId || fallbackId;
       return {
-        id: typeof finding.id === 'string' && finding.id ? finding.id : canonicalKey,
-        status: finding.status === 'suppressed' ? 'suppressed' : 'reported',
-        path: typeof finding.path === 'string' ? finding.path : null,
+        id: stableId || canonicalKey,
+        status: forcedStatus ?? (finding.status === 'suppressed' ? 'suppressed' : 'reported'),
+        path: metadataField(finding.path) || null,
         line: Number.isSafeInteger(finding.line) && finding.line > 0 ? finding.line : null,
         summary: shortSummary(finding.title, 'Prior Buddy finding'),
-        url: review.url ?? review.html_url ?? null,
+        url: metadataField(review.url ?? review.html_url) || null,
         source,
         canonicalKey,
       };
@@ -254,7 +273,10 @@ function removeMetadata(body) {
 
 function normalizeRootReview(review) {
   const records = parseBuddyMetadata(review?.body);
-  const findings = records.flatMap((record) => metadataEntries(record, review));
+  const forcedStatus = review?.state === 'DISMISSED' ? 'dismissed' : null;
+  const findings = records.flatMap(
+    (record) => metadataEntries(record, review, 'root-review', forcedStatus),
+  );
   if (findings.length > 0) return findings;
 
   const body = removeMetadata(review?.body);
@@ -404,13 +426,19 @@ export function applyReviewAssessments(entries, assessments) {
 }
 
 function packetLine(entry) {
-  const statuses = unique(entry.statuses ?? [entry.status]).join('/');
+  const statuses = unique(entry.statuses ?? [entry.status])
+    .map(metadataField)
+    .filter(Boolean)
+    .join('/');
   const location = entry.path
-    ? `${entry.path}${entry.line ? `:${entry.line}` : ''}`
+    ? `${metadataField(entry.path)}${entry.line ? `:${entry.line}` : ''}`
     : 'general';
-  const urls = unique(entry.urls ?? [entry.url]).join(', ');
+  const urls = unique(entry.urls ?? [entry.url])
+    .map(metadataField)
+    .filter(Boolean)
+    .join(', ');
   const suffix = urls ? ` — ${urls}` : '';
-  return `- [${statuses}] ${entry.id} ${location} — ${shortSummary(entry.summary)}${suffix}`
+  return `- [${statuses}] ${metadataField(entry.id)} ${location} — ${shortSummary(entry.summary)}${suffix}`
     .slice(0, PACKET_LINE_LIMIT);
 }
 
