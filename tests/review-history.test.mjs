@@ -580,7 +580,7 @@ test('inline finding marker coalesces a live thread with root review metadata', 
 
   assert.equal(entries.length, 1);
   assert.equal(entries[0].id, 'BRB001');
-  assert.equal(entries[0].canonicalKey, 'legacy:R-buddy-BRB001:BRB001');
+  assert.equal(entries[0].canonicalKey, 'review:R-buddy-BRB001:BRB001');
   assert.equal(entries[0].summary, 'The cache leaks tenant state');
   assert.deepEqual(entries[0].statuses, ['open', 'reported']);
   assert.deepEqual(entries[0].urls, [
@@ -625,10 +625,10 @@ test('unrelated ordinal Buddy IDs from separate legacy reviews remain distinct',
   assert.notEqual(entries[0].canonicalKey, entries[1].canonicalKey);
 });
 
-test('durable semantic key coalesces its root review and matching inline thread', async () => {
+test('review-linkage fingerprint coalesces root metadata and inline thread in one review', async () => {
   const key = `BRBK1_${'a'.repeat(64)}`;
   const metadata = {
-    findings: [{ id: 'BRB001', key, title: 'Shared issue', path: 'src/shared.ts', line: 9 }],
+    findings: [{ id: 'BRB001', linkage: key, title: 'Shared issue', path: 'src/shared.ts', line: 9 }],
   };
   const execute = fakeExecute([
     makeThreadPage({
@@ -663,8 +663,86 @@ test('durable semantic key coalesces its root review and matching inline thread'
   });
 
   assert.equal(entries.length, 1);
-  assert.equal(entries[0].canonicalKey, key);
+  assert.equal(entries[0].canonicalKey, `review:R-shared:${key}`);
   assert.deepEqual(entries[0].statuses, ['open', 'reported']);
+});
+
+test('identical review-linkage fingerprints from separate reviews remain visible', async () => {
+  const linkage = `BRBK1_${'b'.repeat(64)}`;
+  const metadata = {
+    findings: [{
+      id: 'BRB001',
+      linkage,
+      title: 'The cache leaks tenant state',
+      path: 'src/cache.ts',
+      line: 9,
+    }],
+  };
+  const execute = fakeExecute([
+    makeThreadPage({ nodes: [] }),
+    makeReviewPage({
+      nodes: ['R-first', 'R-second'].map((id) => ({
+        id,
+        body: `<!-- blast-radius-buddy-review:${JSON.stringify(metadata)} -->`,
+        url: `https://example/${id}`,
+        state: 'COMMENTED',
+        author: { login: 'buddy' },
+      })),
+    }),
+    { stdout: '[[]]' },
+  ]);
+
+  const entries = await loadReviewLedger({
+    repo: 'acme/widget', number: 19, headSha: 'abcdef0', prAuthor: 'author', execute,
+  });
+
+  assert.equal(entries.length, 2);
+  assert.deepEqual(entries.map(({ canonicalKey }) => canonicalKey), [
+    `review:R-first:${linkage}`,
+    `review:R-second:${linkage}`,
+  ]);
+});
+
+test('paraphrased versions of one issue across reviews both remain for semantic judgment', async () => {
+  const metadata = (id, linkage, title) => ({
+    findings: [{ id, linkage, title, path: 'src/cache.ts', line: 9 }],
+  });
+  const execute = fakeExecute([
+    makeThreadPage({ nodes: [] }),
+    makeReviewPage({
+      nodes: [
+        {
+          id: 'R-original',
+          body: `<!-- blast-radius-buddy-review:${JSON.stringify(metadata(
+            'BRB001', `BRBK1_${'c'.repeat(64)}`, 'Cache entry crosses tenant boundaries',
+          ))} -->`,
+          url: 'https://example/original',
+          state: 'COMMENTED',
+          author: { login: 'buddy' },
+        },
+        {
+          id: 'R-paraphrase',
+          body: `<!-- blast-radius-buddy-review:${JSON.stringify(metadata(
+            'BRB007', `BRBK1_${'d'.repeat(64)}`, 'A tenant can receive another tenant cache value',
+          ))} -->`,
+          url: 'https://example/paraphrase',
+          state: 'COMMENTED',
+          author: { login: 'buddy' },
+        },
+      ],
+    }),
+    { stdout: '[[]]' },
+  ]);
+
+  const entries = await loadReviewLedger({
+    repo: 'acme/widget', number: 19, headSha: 'abcdef0', prAuthor: 'author', execute,
+  });
+
+  assert.equal(entries.length, 2);
+  assert.deepEqual(entries.map(({ summary }) => summary), [
+    'Cache entry crosses tenant boundaries',
+    'A tenant can receive another tenant cache value',
+  ]);
 });
 
 test('applyReviewAssessments uses only explicit host revalidation transitions', () => {

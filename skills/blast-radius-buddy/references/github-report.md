@@ -100,7 +100,7 @@ Use these field rules:
 
 - `verdict` is exactly and case-sensitively one of `Approve`, `Actionable findings`, or `Review completed with uncertainty`.
 - `headSha` is the full 40-character hexadecimal commit ID captured before review.
-- `findings` contains only actionable `critical`, `high`, or `medium` findings. Use `[]` for a clean result. Each finding has a unique run-local `BRB001`-style `id`; `confidence` is `high` or `medium`; the descriptive fields are non-empty strings. `prepare` derives a durable semantic key from the finding's normalized path, title, and failure description for history matching across reruns.
+- `findings` contains only actionable `critical`, `high`, or `medium` findings. Use `[]` for a clean result. Each finding has a unique run-local `BRB001`-style `id`; `confidence` is `high` or `medium`; the descriptive fields are non-empty strings. `prepare` derives a review-linkage fingerprint from the finding's path, title, and failure description only to join root metadata and inline comments from the same GitHub review.
 - Each `evidence` entry has a repository-relative `path`, positive integer `line`, and non-empty `behavior`. Use a reliable PR-relative new-side changed line when the finding should be inline.
 - `suggestedFix` is non-empty prose. `suggestedChange` is either `null` or the exact replacement text. `mechanical` is a boolean and is `true` only when the replacement meets the safe-suggestion rules below.
 - `priorFeedback` entries use exactly `id`, `status`, `summary`, `path`, and `line`. `validation` and `deferred` are arrays of non-empty strings. Use empty arrays when a section has no entries.
@@ -124,7 +124,7 @@ Write the explicit gate state to `GATES.json` using exactly these fields:
 
 `findings` contains the surviving report finding IDs. `verifierVerdict` uses the exact verification verdict. Use `reproductionComplete: true` when selected reproduction completed or none was required. `headUnchanged` records the final exact-SHA check.
 
-Prepare the review artifacts and gate-derived event before submission:
+Prepare the review body and comments before submission:
 
 ```bash
 node skills/blast-radius-buddy/scripts/github-review.mjs prepare \
@@ -132,24 +132,27 @@ node skills/blast-radius-buddy/scripts/github-review.mjs prepare \
   --diff-file PR.diff \
   --gates-file GATES.json \
   --body-output BODY.md \
-  --comments-output COMMENTS.json \
-  --event-output PREPARED_EVENT.json
+  --comments-output COMMENTS.json
 ```
 
-`prepare` is deterministic and does not call GitHub. It strictly validates the normalized report, requires its finding IDs and verdict to agree with the gates, derives the only allowed event, writes a marker-safe report body, anchors only approved actionable findings on valid new-side diff lines, writes durable semantic finding markers into inline comments, and keeps unanchored findings in the body. Extra, missing, malformed, or contradictory report fields stop preparation.
+`prepare` is deterministic and does not call GitHub. It strictly validates the normalized report, requires its finding IDs and verdict to agree with the gates, derives the only allowed event, writes a marker-safe report body, anchors only approved actionable findings on valid new-side diff lines, writes review-linkage fingerprints into inline comments, and keeps unanchored findings in the body. Extra, missing, malformed, or contradictory report fields stop preparation.
 
-Submit only those prepared artifacts:
+Submit with the original source artifacts plus the prepared body and comments:
 
 ```bash
 node skills/blast-radius-buddy/scripts/github-review.mjs submit \
   --repo OWNER/REPO \
   --pr NUMBER \
-  --prepared-event-file PREPARED_EVENT.json \
+  --report-file REPORT.json \
+  --diff-file PR.diff \
+  --gates-file GATES.json \
   --body-file BODY.md \
   --comments-file COMMENTS.json
 ```
 
-The prepared event artifact binds the full head SHA, derived event, body, and comments with SHA-256 digests. `submit` rejects a separately chosen event, a shortened or changed head, or any body/comment edit after preparation. It never accepts `REQUEST_CHANGES`.
+`submit` recomputes and strictly validates `REPORT.json`, `PR.diff`, and `GATES.json`; derives the event again; and rejects any body or comments that differ from that preparation. It accepts no caller-supplied event, head, digest, or approval artifact. Immediately before the GitHub POST, it reads the current PR head and rejects a stale review without posting. It never accepts `REQUEST_CHANGES`.
+
+`review-history.mjs` scopes each review-linkage fingerprint to its GitHub review ID. It joins that review's root metadata and inline thread, but preserves entries from every separate review even when their IDs or fingerprints match. Cross-run duplicate suppression is host semantic judgment over the complete ledger, including paraphrased findings; fingerprint equality is never proof of semantic equality across runs.
 
 Start the native review with exactly:
 

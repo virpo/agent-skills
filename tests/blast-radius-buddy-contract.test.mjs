@@ -25,6 +25,8 @@ test('documents the native high-signal PR review contract', async () => {
   assert.match(skill, /one fresh-eyes/i);
   assert.match(skill, /APPROVE/);
   assert.match(skill, /never.*REQUEST_CHANGES/is);
+  assert.match(skill, /cross-run duplicate suppression.*host semantic judgment.*complete prior-feedback ledger/is);
+  assert.match(skill, /submit.*report.*diff.*gate.*recheck.*head.*write boundary/is);
   assert.match(skill, /Do not add tests, edit production code, apply fixes, commit, or push/i);
   assert.match(report, /careful shake/);
   assert.match(report, /here's what held and what came loose/);
@@ -70,20 +72,23 @@ test('documents the native high-signal PR review contract', async () => {
   assert.match(validation, /clean.*only.*none.*never.*actionable/is);
   assert.match(
     report,
-    /github-review\.mjs prepare.*--report-file.*--diff-file.*--gates-file.*--body-output.*--comments-output.*--event-output/is,
+    /github-review\.mjs prepare.*--report-file.*--diff-file.*--gates-file.*--body-output.*--comments-output/is,
   );
   assert.match(
     report,
-    /github-review\.mjs submit.*--prepared-event-file.*--body-file.*--comments-file/is,
+    /github-review\.mjs submit.*--report-file.*--diff-file.*--gates-file.*--body-file.*--comments-file/is,
   );
-  assert.match(report, /run-local.*BRB001.*durable semantic key/is);
-  assert.match(report, /prepared event artifact.*binds.*head.*event.*body.*comments/is);
+  assert.doesNotMatch(report, /PREPARED_EVENT|prepared event artifact|--event-output/i);
+  assert.match(report, /review-linkage fingerprint.*same GitHub review/is);
+  assert.match(report, /cross-run duplicate suppression.*host semantic judgment.*complete ledger/is);
+  assert.match(report, /submit.*recomputes.*REPORT.*DIFF.*GATES.*head.*immediately before.*POST/is);
   assert.match(report, /prepare.*deterministic.*does not.*GitHub/is);
   assert.doesNotMatch(skill, /repair loop/i);
   assert.ok(skill.trim().split(/\s+/).length < 700, 'SKILL.md must stay below 700 words');
   assert.doesNotMatch(readme, /accepted findings[^.\n]*fix/i);
   assert.match(readme, /does not authorize code edits, commits, pushes/i);
   assert.match(readme, /host-selected diagnostic.*isolated checkout.*tool-less classification/is);
+  assert.match(readme, /cross-run duplicates.*host semantic judgment.*complete ledger/is);
 });
 
 test('ships every deterministic PR review helper', async () => {

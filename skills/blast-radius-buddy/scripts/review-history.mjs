@@ -12,7 +12,7 @@ const METADATA_PREFIX = '<!-- blast-radius-buddy-review:';
 const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const SUMMARY_LIMIT = 160;
 const PACKET_LINE_LIMIT = 480;
-const SEMANTIC_KEY_PATTERN = /^BRBK1_[0-9a-f]{64}$/;
+const REVIEW_LINKAGE_PATTERN = /^BRBK1_[0-9a-f]{64}$/;
 
 const REVIEW_THREADS_QUERY = `
 query ReviewThreads($owner: String!, $name: String!, $number: Int!, $cursor: String) {
@@ -194,13 +194,13 @@ export function classifyThread(thread, prAuthor) {
   return 'resolved';
 }
 
-function semanticFindingKey(value) {
+function reviewLinkageFingerprint(value) {
   const normalized = normalizeString(value);
-  return SEMANTIC_KEY_PATTERN.test(normalized) ? normalized : '';
+  return REVIEW_LINKAGE_PATTERN.test(normalized) ? normalized : '';
 }
 
-function scopedLegacyKey(reviewId, findingId) {
-  return `legacy:${normalizedText(reviewId, 'unknown-review')}:${findingId}`;
+function reviewScopedKey(reviewId, linkage) {
+  return `review:${normalizedText(reviewId, 'unknown-review')}:${linkage}`;
 }
 
 function inlineFindingIdentity(body) {
@@ -210,7 +210,7 @@ function inlineFindingIdentity(body) {
   );
   const id = buddyFindingId(match?.[1]);
   if (!id) return null;
-  return { id, key: semanticFindingKey(match?.[2]) };
+  return { id, linkage: reviewLinkageFingerprint(match?.[2]) };
 }
 
 function removeInlineFindingMarker(body) {
@@ -223,8 +223,12 @@ function normalizeThread(thread, prAuthor) {
   const root = Array.isArray(thread?.comments?.nodes) ? thread.comments.nodes[0] : undefined;
   const id = normalizedText(thread?.id ?? root?.id, 'unknown-thread');
   const identity = inlineFindingIdentity(root?.body);
-  const canonicalKey = identity?.key
-    || (identity ? scopedLegacyKey(root?.pullRequestReview?.id ?? id, identity.id) : id);
+  const canonicalKey = identity
+    ? reviewScopedKey(
+      root?.pullRequestReview?.id ?? id,
+      identity.linkage || identity.id,
+    )
+    : id;
   return {
     id: identity?.id ?? id,
     status: classifyThread(thread ?? {}, prAuthor),
@@ -284,9 +288,11 @@ function metadataEntries(record, review, source = 'root-review', forcedStatus = 
       const stableId = buddyFindingId(finding.id);
       if (!stableId) return null;
       const legacyId = buddyFindingId(finding.canonicalKey) || stableId;
-      const semanticKey = semanticFindingKey(finding.key);
-      const canonicalKey = semanticKey
-        || scopedLegacyKey(review?.id ?? review?.url ?? review?.html_url, legacyId);
+      const linkage = reviewLinkageFingerprint(finding.linkage ?? finding.key) || legacyId;
+      const canonicalKey = reviewScopedKey(
+        review?.id ?? review?.url ?? review?.html_url,
+        linkage,
+      );
       return {
         id: stableId || canonicalKey,
         status: forcedStatus ?? (finding.status === 'suppressed' ? 'suppressed' : 'reported'),

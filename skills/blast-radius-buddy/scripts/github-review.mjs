@@ -13,11 +13,11 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import { assertHeadUnchanged } from './github-pr.mjs';
 import { decideReviewEvent } from './review-protocol.mjs';
 
 const execFileAsync = promisify(execFile);
 const OPENING = "🧨 The shake is over; here's what held and what came loose.";
-const EVENTS = new Set(['COMMENT', 'APPROVE']);
 const VERDICTS = new Set([
   'Approve',
   'Actionable findings',
@@ -38,8 +38,8 @@ const REPORT_FINDING_FIELDS = [
 const REPORT_EVIDENCE_FIELDS = ['path', 'line', 'behavior'];
 const PRIOR_FEEDBACK_FIELDS = ['id', 'status', 'summary', 'path', 'line'];
 const COVERAGE_FIELDS = ['security', 'blastRadius', 'featureTruth'];
-const PREPARED_EVENT_FIELDS = [
-  'version', 'headSha', 'event', 'bodySha256', 'commentsSha256',
+const SUBMISSION_FIELDS = [
+  'repo', 'number', 'report', 'diff', 'gates', 'body', 'comments', 'execute',
 ];
 
 const defaultExecute = (command, args) => execFileAsync(command, args, {
@@ -244,7 +244,7 @@ function semanticText(value) {
     : '';
 }
 
-export function findingSemanticKey(finding) {
+export function findingReviewLinkage(finding) {
   if (!plainObject(finding)) throw new TypeError('finding must be an object');
   const paths = Array.isArray(finding.evidence)
     ? [...new Set(finding.evidence
@@ -289,7 +289,7 @@ function metadataFor(headSha, findings) {
       const { path, line } = findingAnchor(finding);
       return {
         id: stableFindingId(finding.id, `findings[${index}].id`),
-        key: findingSemanticKey(finding),
+        linkage: findingReviewLinkage(finding),
         title: nonEmptyString(finding.title, `findings[${index}].title`),
         path,
         line,
@@ -572,7 +572,7 @@ function validAnchor(evidence, changedLines) {
 
 function inlineBody(finding, anchor) {
   const id = stableFindingId(finding.id);
-  const key = findingSemanticKey(finding);
+  const linkage = findingReviewLinkage(finding);
   const title = visibleText(nonEmptyString(finding.title, `${id}.title`));
   const severity = typeof finding.severity === 'string'
     ? visibleText(finding.severity)
@@ -605,7 +605,7 @@ function inlineBody(finding, anchor) {
     const closingLineBreak = visibleSuggestion.endsWith('\n') ? '' : '\n';
     lines.push('', `\`\`\`suggestion\n${visibleSuggestion}${closingLineBreak}\`\`\``);
   }
-  lines.push('', `<!-- blast-radius-buddy-finding:${id}:${key} -->`);
+  lines.push('', `<!-- blast-radius-buddy-finding:${id}:${linkage} -->`);
   return lines.join('\n');
 }
 
@@ -655,25 +655,7 @@ export function prepareReview(report, diff, gates) {
   const findings = normalized.findings;
   const changedLines = collectChangedLines(diff);
   const { inline: comments } = partitionInlineFindings(findings, changedLines);
-  const eventArtifact = {
-    version: 1,
-    headSha: normalized.headSha,
-    event,
-    bodySha256: preparedContentHash(normalized.headSha, event, 'body', body),
-    commentsSha256: preparedContentHash(
-      normalized.headSha,
-      event,
-      'comments',
-      `${JSON.stringify(comments)}\n`,
-    ),
-  };
-  return { body, comments, eventArtifact };
-}
-
-function preparedContentHash(headSha, event, kind, contents) {
-  return createHash('sha256')
-    .update(`1\0${headSha}\0${event}\0${kind}\0${contents}`)
-    .digest('hex');
+  return { body, comments, event, headSha: normalized.headSha };
 }
 
 function validateComment(comment, index) {
@@ -687,51 +669,42 @@ function validateComment(comment, index) {
   return { path, line, side: 'RIGHT', body };
 }
 
-function validatePreparedEvent(value) {
-  assertExactFields(value, PREPARED_EVENT_FIELDS, 'prepared event artifact');
-  if (value.version !== 1) throw new TypeError('prepared event artifact version is unsupported');
-  const headSha = fullHeadSha(value.headSha);
-  const event = enumValue(value.event, EVENTS, 'prepared event artifact.event');
-  for (const field of ['bodySha256', 'commentsSha256']) {
-    if (typeof value[field] !== 'string' || !/^[0-9a-f]{64}$/.test(value[field])) {
-      throw new TypeError(`prepared event artifact.${field} must be a SHA-256 digest`);
-    }
+function validateSubmission(options) {
+  if (!plainObject(options)) throw new TypeError('submitReview options must be an object');
+  const allowed = new Set(SUBMISSION_FIELDS);
+  for (const field of Object.keys(options)) {
+    if (!allowed.has(field)) throw new TypeError(`submitReview has unexpected option ${field}`);
   }
-  return { ...value, headSha, event };
-}
-
-function validateSubmission({ repo, number, preparedEvent, body, comments, execute }) {
+  const {
+    repo,
+    number,
+    report,
+    diff,
+    gates,
+    body,
+    comments,
+    execute,
+  } = options;
   if (typeof repo !== 'string' || !REPO_PATTERN.test(repo)) {
     throw new TypeError('repo must use OWNER/REPO format');
   }
   const validatedNumber = positiveSafeInteger(number, 'number');
-  const artifact = validatePreparedEvent(preparedEvent);
   const validatedBody = nonEmptyString(body, 'body');
   if (!Array.isArray(comments)) throw new TypeError('comments must be an array');
   if (typeof execute !== 'function') throw new TypeError('execute must be a function');
-  const normalizedComments = comments.map(validateComment);
-  const bodySha256 = preparedContentHash(
-    artifact.headSha,
-    artifact.event,
-    'body',
-    validatedBody,
-  );
-  const commentsSha256 = preparedContentHash(
-    artifact.headSha,
-    artifact.event,
-    'comments',
-    `${JSON.stringify(comments)}\n`,
-  );
-  if (bodySha256 !== artifact.bodySha256 || commentsSha256 !== artifact.commentsSha256) {
-    throw new TypeError('Prepared event artifact does not match review body or comments');
+  const recomputed = prepareReview(report, diff, gates);
+  if (validatedBody !== recomputed.body
+    || JSON.stringify(comments) !== JSON.stringify(recomputed.comments)) {
+    throw new TypeError('Prepared review body or comments do not match source artifacts');
   }
   return {
     repo,
     number: validatedNumber,
-    headSha: artifact.headSha,
-    event: artifact.event,
-    body: validatedBody,
-    comments: normalizedComments,
+    headSha: recomputed.headSha,
+    event: recomputed.event,
+    body: recomputed.body,
+    comments: recomputed.comments.map(validateComment),
+    execute,
   };
 }
 
@@ -752,21 +725,10 @@ function parseReviewResponse(result) {
   return { reviewId: value.id, reviewUrl: value.html_url };
 }
 
-export async function submitReview({
-  repo,
-  number,
-  preparedEvent,
-  body,
-  comments,
-  execute = defaultExecute,
-}) {
+export async function submitReview(options) {
   const validated = validateSubmission({
-    repo,
-    number,
-    preparedEvent,
-    body,
-    comments,
-    execute,
+    ...options,
+    execute: options?.execute ?? defaultExecute,
   });
   const payload = {
     commit_id: validated.headSha,
@@ -779,7 +741,13 @@ export async function submitReview({
 
   try {
     await writeFileDefault(payloadFile, JSON.stringify(payload), { encoding: 'utf8', mode: 0o600 });
-    const response = await execute('gh', [
+    await assertHeadUnchanged({
+      repo: validated.repo,
+      number: validated.number,
+      expectedHeadSha: validated.headSha,
+      execute: validated.execute,
+    });
+    const response = await validated.execute('gh', [
       'api',
       '--method',
       'POST',
@@ -796,9 +764,9 @@ export async function submitReview({
 function usage() {
   return [
     'Usage:',
-    '  github-review.mjs prepare --report-file REPORT.json --diff-file PR.diff --gates-file GATES.json --body-output BODY.md --comments-output COMMENTS.json --event-output PREPARED_EVENT.json',
+    '  github-review.mjs prepare --report-file REPORT.json --diff-file PR.diff --gates-file GATES.json --body-output BODY.md --comments-output COMMENTS.json',
     '  github-review.mjs render --report-file REPORT.json --output BODY.md',
-    '  github-review.mjs submit --repo OWNER/REPO --pr NUMBER --prepared-event-file PREPARED_EVENT.json --body-file BODY.md --comments-file COMMENTS.json',
+    '  github-review.mjs submit --repo OWNER/REPO --pr NUMBER --report-file REPORT.json --diff-file PR.diff --gates-file GATES.json --body-file BODY.md --comments-file COMMENTS.json',
   ].join('\n');
 }
 
@@ -844,7 +812,7 @@ export async function main(args, dependencies = {}) {
       rest,
       new Set([
         'report-file', 'diff-file', 'gates-file',
-        'body-output', 'comments-output', 'event-output',
+        'body-output', 'comments-output',
       ]),
     );
     const reportFile = resolve(requireOption(options, 'report-file'));
@@ -852,7 +820,6 @@ export async function main(args, dependencies = {}) {
     const gatesFile = resolve(requireOption(options, 'gates-file'));
     const bodyOutput = resolve(requireOption(options, 'body-output'));
     const commentsOutput = resolve(requireOption(options, 'comments-output'));
-    const eventOutput = resolve(requireOption(options, 'event-output'));
     const [reportText, diff, gatesText] = await Promise.all([
       readFile(reportFile, 'utf8'),
       readFile(diffFile, 'utf8'),
@@ -863,7 +830,6 @@ export async function main(args, dependencies = {}) {
     const result = prepareReview(report, diff, gates);
     await writeFile(bodyOutput, result.body, 'utf8');
     await writeFile(commentsOutput, `${JSON.stringify(result.comments)}\n`, 'utf8');
-    await writeFile(eventOutput, `${JSON.stringify(result.eventArtifact)}\n`, 'utf8');
     return result;
   }
 
@@ -879,22 +845,31 @@ export async function main(args, dependencies = {}) {
   if (command === 'submit') {
     const options = readOptions(
       rest,
-      new Set(['repo', 'pr', 'prepared-event-file', 'body-file', 'comments-file']),
+      new Set([
+        'repo', 'pr', 'report-file', 'diff-file', 'gates-file', 'body-file', 'comments-file',
+      ]),
     );
-    const preparedEventFile = resolve(requireOption(options, 'prepared-event-file'));
+    const reportFile = resolve(requireOption(options, 'report-file'));
+    const diffFile = resolve(requireOption(options, 'diff-file'));
+    const gatesFile = resolve(requireOption(options, 'gates-file'));
     const bodyFile = resolve(requireOption(options, 'body-file'));
     const commentsFile = resolve(requireOption(options, 'comments-file'));
-    const [preparedEventText, body, commentsText] = await Promise.all([
-      readFile(preparedEventFile, 'utf8'),
+    const [reportText, diff, gatesText, body, commentsText] = await Promise.all([
+      readFile(reportFile, 'utf8'),
+      readFile(diffFile, 'utf8'),
+      readFile(gatesFile, 'utf8'),
       readFile(bodyFile, 'utf8'),
       readFile(commentsFile, 'utf8'),
     ]);
-    const preparedEvent = parseJsonFile(preparedEventText, preparedEventFile);
+    const report = parseJsonFile(reportText, reportFile);
+    const gates = parseJsonFile(gatesText, gatesFile);
     const comments = parseJsonFile(commentsText, commentsFile);
     const result = await submitReview({
       repo: requireOption(options, 'repo'),
       number: requireOption(options, 'pr'),
-      preparedEvent,
+      report,
+      diff,
+      gates,
       body,
       comments,
       execute,
