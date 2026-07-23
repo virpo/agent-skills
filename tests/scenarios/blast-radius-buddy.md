@@ -52,7 +52,7 @@ Abort the review as stale.
 | --- | --- | --- |
 | `clean-pr.md` | The control jumps straight to `Review event: APPROVE` after one unstructured assessment. It records no three-angle isolation, structured validation, fresh-eyes pass, or marker lifecycle, so the approval gates are unproven. | Run exactly three fresh isolated angles, reject any naming bait, complete structured validation and fresh-eyes verification, recheck the head SHA, update one marker through completion, and choose `APPROVE` only after every gate passes. |
 | `medium-regression.md` | The control finds the defect but chooses `Review event: REQUEST_CHANGES` and records neither isolated angles nor validation. | Report the pagination defect exactly once, reject the deliberate formatting bait, validate or narrow the finding, update one marker through completion, and submit `COMMENT`, never `REQUEST_CHANGES`. |
-| `stale-head.md` | The control correctly says `Abort the review as stale` but its `GitHub output: none` leaves no marker lifecycle or terminal stale status. | Replace the working marker with the exact old/new-SHA stale message, leave no working marker behind, and submit no native review. |
+| `stale-head.md` | The control correctly says `Abort the review as stale` but its `GitHub output: none` leaves no marker lifecycle or terminal stale status. | Replace the working marker with the exact branded stale message, leave no working marker behind, and submit no native review. |
 
 ## Forward test: 2026-07-22
 
@@ -92,16 +92,18 @@ No other skill behavior changed.
 | Native event | Pass: `APPROVE`, zero inline comments | Pass: `COMMENT`, one pagination comment | Pass: no native review body, comments, or event |
 | Marker terminal state | Pass: exact completed marker | Pass: exact completed marker | Pass: exact stale-head marker only |
 
-Both submitted mock reviews start exactly with:
+Both submitted mock reviews use the same current title:
 
-```text
-🧨 The shake is over; here's what held and what came loose.
+```markdown
+### 🧨 Blast Radius Buddy
 ```
 
-All three runs start with the exact playful working marker. The clean and medium runs replace it with the completed marker; the stale run replaces it with:
+The clean review follows it with `Nothing needs redoing. Good to go.` The medium review follows it with `One thing needs another pass; details are inline.` All three runs start with the one working marker. The clean and medium runs replace it with the completed marker; the stale run replaces it with:
 
-```text
-Blast Radius Buddy stopped because the PR moved from `1111111` to `2222222`. Run it again for the new revision.
+```markdown
+### 🧨 Blast Radius Buddy
+
+The PR changed while I was reviewing it. Run me again on the latest version.
 
 <!-- blast-radius-buddy -->
 ```
@@ -252,7 +254,7 @@ The exact gates were:
 }
 ```
 
-Revised `github-review.mjs prepare` and the fake submit executor produced the exact opening and suggestion comment below with native event `APPROVE`:
+At that revision, `github-review.mjs prepare` and the fake submit executor produced the historical opening and suggestion comment below with native event `APPROVE`:
 
 ```text
 🧨 The shake is over; here's what held and what came loose.
@@ -273,7 +275,7 @@ Revised `github-review.mjs prepare` and the fake submit executor produced the ex
 }
 ```
 
-No reviewer mentioned the short `ms` name, quote style, missing trailing comma, or formatting. No finding survived. The fake executor logged only `mock-head-recheck` then `mock-native-review-post`; it launched no `gh` subprocess and made no network or GitHub call. The marker lifecycle existed only as local mock artifacts and ended with:
+No reviewer mentioned the short `ms` name, quote style, missing trailing comma, or formatting. No finding survived. The fake executor logged only `mock-head-recheck` then `mock-native-review-post`; it launched no `gh` subprocess and made no network or GitHub call. At that revision, the marker lifecycle existed only as local mock artifacts and ended with:
 
 ```text
 Review complete for `4444444`: https://github.invalid/example/telemetry/pull/27#pullrequestreview-9002

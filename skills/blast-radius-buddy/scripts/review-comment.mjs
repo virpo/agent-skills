@@ -9,6 +9,7 @@ import { resolve } from 'node:path';
 const execFileAsync = promisify(execFile);
 const MARKER = '<!-- blast-radius-buddy -->';
 const LEGACY_MARKER = '<!-- review-tube-man -->';
+const TITLE = '### 🧨 Blast Radius Buddy';
 const STAGES = [
   ['review', 'Three-angle review'],
   ['validation', 'Finding validation'],
@@ -33,27 +34,52 @@ function shortSha(value) {
 }
 
 export function buildProgressBody({ headSha, completedStages = [] }) {
-  const completed = new Set(completedStages);
-  const checks = STAGES.map(([key, label]) => `- [${completed.has(key) ? 'x' : ' '}] ${label}`);
+  shortSha(headSha);
+  if (!Array.isArray(completedStages)) {
+    throw new TypeError('completedStages must be an array');
+  }
   return [
-    `🧨 Blast Radius Buddy is giving \`${shortSha(headSha)}\` a careful shake; I'll keep this comment updated as the review moves.`,
+    TITLE,
     '',
-    ...checks,
+    'Checking this PR now. Be right back.',
     '',
     MARKER,
   ].join('\n');
 }
 
 export function buildFailureBody({ headSha, reason }) {
-  return `Blast Radius Buddy could not complete the review of \`${shortSha(headSha)}\`: ${reason}.\n\n${MARKER}`;
+  shortSha(headSha);
+  if (typeof reason !== 'string' || reason.trim().length === 0) {
+    throw new TypeError('reason must be a non-empty string');
+  }
+  const conclusion = reason.trim().match(/[.!?]$/) ? reason.trim() : `${reason.trim()}.`;
+  return [TITLE, '', `Review stopped: ${conclusion}`, '', MARKER].join('\n');
 }
 
 export function buildStaleBody({ oldSha, newSha }) {
-  return `Blast Radius Buddy stopped because the PR moved from \`${shortSha(oldSha)}\` to \`${shortSha(newSha)}\`. Run it again for the new revision.\n\n${MARKER}`;
+  shortSha(oldSha);
+  shortSha(newSha);
+  return [
+    TITLE,
+    '',
+    'The PR changed while I was reviewing it. Run me again on the latest version.',
+    '',
+    MARKER,
+  ].join('\n');
 }
 
 export function buildCompletionBody({ headSha, reviewUrl }) {
-  return `Review complete for \`${shortSha(headSha)}\`: ${reviewUrl}\n\n${MARKER}`;
+  shortSha(headSha);
+  if (typeof reviewUrl !== 'string' || reviewUrl.trim().length === 0) {
+    throw new TypeError('reviewUrl must be a non-empty string');
+  }
+  return [
+    TITLE,
+    '',
+    `Review complete: [see the result](${reviewUrl.trim()}).`,
+    '',
+    MARKER,
+  ].join('\n');
 }
 
 async function defaultExecute(command, args) {

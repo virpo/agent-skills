@@ -20,7 +20,8 @@ import {
 } from './review-protocol.mjs';
 
 const execFileAsync = promisify(execFile);
-const OPENING = "🧨 The shake is over; here's what held and what came loose.";
+const TITLE = '### 🧨 Blast Radius Buddy';
+const AUDIT_FOOTER = '<sub>3 reviewers · 1 fresh-eyes check</sub>';
 const VERDICTS = new Set([
   'Approve',
   'Actionable findings',
@@ -495,7 +496,7 @@ function formatFinding(finding, index) {
   const severity = visibleText(nonEmptyString(finding.severity, `findings[${index}].severity`));
   const confidence = visibleText(nonEmptyString(finding.confidence, `findings[${index}].confidence`));
   const lines = [
-    `### ${id} · [${severity} / ${confidence}] ${title}`,
+    `#### ${id} · [${severity} / ${confidence}] ${title}`,
     '',
   ];
   for (const [label, field] of [
@@ -518,7 +519,7 @@ function formatSuggestion(suggestion, index) {
   const id = stableSuggestionId(suggestion.id, `suggestions[${index}].id`);
   const title = visibleText(nonEmptyString(suggestion.title, `suggestions[${index}].title`));
   const lines = [
-    `### ${id} · ${title}`,
+    `#### ${id} · ${title}`,
     '',
     `- Improvement: ${visibleText(suggestion.improvement)}`,
     `- Benefit: ${visibleText(suggestion.benefit)}`,
@@ -527,94 +528,83 @@ function formatSuggestion(suggestion, index) {
   return lines.join('\n');
 }
 
-function formatLedgerEntry(entry) {
-  if (typeof entry === 'string') return `- ${visibleText(entry)}`;
-  if (!plainObject(entry)) return null;
-  const id = typeof entry.id === 'string' && entry.id.length > 0
-    ? `${visibleText(entry.id)}: `
-    : '';
-  const status = typeof entry.status === 'string' && entry.status.length > 0
-    ? `[${visibleText(entry.status)}] `
-    : '';
-  const summary = typeof entry.summary === 'string' && entry.summary.trim().length > 0
-    ? visibleText(entry.summary.trim())
-    : 'Prior feedback';
-  const location = typeof entry.path === 'string' && entry.path.length > 0
-    ? ` (\`${visibleText(entry.path)}${Number.isSafeInteger(entry.line) && entry.line > 0 ? `:${entry.line}` : ''}\`)`
-    : '';
-  return `- ${id}${status}${summary}${location}`;
+function countPhrase(count, singular, plural) {
+  return count === 1 ? `One ${singular}` : `${count} ${plural}`;
 }
 
-function stringItems(value, label) {
-  if (!Array.isArray(value)) throw new TypeError(`${label} must be an array`);
-  return value.map(
-    (item, index) => visibleText(nonEmptyString(item, `${label}[${index}]`)),
-  );
+function appendItems(lines, items, formatter) {
+  items.forEach((item, index) => {
+    if (index > 0) lines.push('');
+    lines.push(formatter(item, index));
+  });
 }
 
-export function buildReviewBody(report) {
-  const normalized = validateNormalizedReport(report);
-  const { findings, suggestions } = normalized;
-  const headSha = normalized.headSha;
-  const validation = stringItems(normalized.validation, 'report.validation');
-  const deferred = stringItems(normalized.deferred, 'report.deferred');
-  const coverage = {
-    security: visibleText(normalized.coverage.security),
-    blastRadius: visibleText(
-      normalized.coverage.blastRadius,
-    ),
-    featureTruth: visibleText(
-      normalized.coverage.featureTruth,
-    ),
-  };
+function buildReviewBodyFromNormalized(normalized, {
+  bodyFindings = normalized.findings,
+  bodySuggestions = normalized.suggestions,
+  inlineSuggestionCount = 0,
+} = {}) {
+  const lines = [TITLE, ''];
+  const findingCount = normalized.findings.length;
+  const suggestionCount = normalized.suggestions.length;
 
-  const lines = [
-    OPENING,
-    '',
-    `**Verdict:** ${normalized.verdict}`,
-    `**Reviewed head:** \`${headSha}\``,
-  ];
-
-  if (findings.length > 0) {
-    lines.push('', '## Actionable findings', '');
-    findings.forEach((finding, index) => {
-      if (index > 0) lines.push('');
-      lines.push(formatFinding(finding, index));
-    });
+  if (findingCount > 0) {
+    const findingPhrase = countPhrase(findingCount, 'thing', 'things');
+    const findingVerb = findingCount === 1 ? 'needs' : 'need';
+    const riskPhrase = countPhrase(normalized.deferred.length, 'risk', 'risks').toLowerCase();
+    const riskVerb = normalized.deferred.length === 1 ? 'needs' : 'need';
+    lines.push(
+      normalized.deferred.length > 0
+        ? `${findingPhrase} ${findingVerb} another pass, and ${riskPhrase} ${riskVerb} a human call:`
+        : bodyFindings.length === 0
+        ? `${findingPhrase} ${findingVerb} another pass; details are inline.`
+        : `${findingPhrase} ${findingVerb} another pass:`,
+    );
+    if (bodyFindings.length > 0) {
+      lines.push('');
+      appendItems(lines, bodyFindings, formatFinding);
+    }
+  } else if (suggestionCount > 0) {
+    const suggestionPhrase = countPhrase(suggestionCount, 'small suggestion', 'small suggestions');
+    lines.push(
+      bodySuggestions.length === 0 && inlineSuggestionCount === suggestionCount
+        ? `Good to go. ${suggestionPhrase} ${suggestionCount === 1 ? 'is' : 'are'} inline.`
+        : `Good to go. ${suggestionPhrase}:`,
+    );
+    if (bodySuggestions.length > 0) {
+      lines.push('');
+      appendItems(lines, bodySuggestions, formatSuggestion);
+    }
+  } else if (normalized.verdict === 'Approve') {
+    lines.push('Nothing needs redoing. Good to go.');
   }
 
-  if (suggestions.length > 0) {
-    lines.push('', '## Non-blocking suggestions', '');
-    suggestions.forEach((suggestion, index) => {
-      if (index > 0) lines.push('');
-      lines.push(formatSuggestion(suggestion, index));
-    });
-  }
-
-  const priorFeedback = normalized.priorFeedback.map(formatLedgerEntry).filter(Boolean);
-  if (priorFeedback.length > 0) {
-    lines.push('', '## Prior feedback', '', ...priorFeedback);
-  }
-  if (validation.length > 0) {
-    lines.push('', '## Validation', '', ...validation.map((item) => `- ${item}`));
-  }
-  if (deferred.length > 0) {
-    lines.push('', '## Deferred', '', ...deferred.map((item) => `- ${item}`));
+  if (normalized.deferred.length > 0) {
+    const riskPhrase = countPhrase(normalized.deferred.length, 'risk', 'risks');
+    if (findingCount === 0) {
+      lines.push(`${riskPhrase} ${normalized.deferred.length === 1 ? 'needs' : 'need'} a human call:`);
+    } else if (bodyFindings.length > 0) {
+      lines.push('', '#### Human call');
+    }
+    lines.push(
+      '',
+      ...normalized.deferred.map((item) => `- ${visibleText(item)}`),
+    );
   }
 
   lines.push(
     '',
-    '## Coverage',
-    '',
-    `- Security and abuse: ${coverage.security}`,
-    `- System blast radius: ${coverage.blastRadius}`,
-    `- Feature truth and adjacent regressions: ${coverage.featureTruth}`,
+    AUDIT_FOOTER,
     '',
     `<!-- blast-radius-buddy-review:${escapeMetadataJson(
-      metadataFor(headSha, findings, suggestions),
+      metadataFor(normalized.headSha, normalized.findings, normalized.suggestions),
     )} -->`,
   );
   return lines.join('\n');
+}
+
+export function buildReviewBody(report) {
+  return buildReviewBodyFromNormalized(validateNormalizedReport(report));
 }
 
 function hunkHeader(line) {
@@ -792,7 +782,11 @@ function inlineFindingBody(finding, anchor) {
   const confidence = typeof finding.confidence === 'string'
     ? visibleText(finding.confidence)
     : 'unknown confidence';
-  const lines = [`**${id} · [${severity} / ${confidence}] ${title}**`];
+  const lines = [
+    TITLE,
+    '',
+    `**${id} · [${severity} / ${confidence}] ${title}**`,
+  ];
   for (const field of ['what', 'why', 'impact']) {
     if (typeof finding[field] === 'string' && finding[field].trim().length > 0) {
       lines.push('', visibleText(finding[field].trim()));
@@ -814,7 +808,11 @@ function inlineSuggestionBody(suggestion, anchor) {
   const id = stableSuggestionId(suggestion.id);
   const linkage = suggestionReviewLinkage(suggestion);
   const title = visibleText(nonEmptyString(suggestion.title, `${id}.title`));
-  const lines = [`**${id} · Non-blocking suggestion · ${title}**`];
+  const lines = [
+    TITLE,
+    '',
+    `**${id} · Non-blocking suggestion · ${title}**`,
+  ];
   for (const [label, field] of [
     ['Improvement', 'improvement'],
     ['Benefit', 'benefit'],
@@ -935,9 +933,11 @@ export function prepareReview(report, diff, gates, verification) {
     && gates.materialUncertainty !== true) {
     throw new TypeError('Uncertainty report requires the material uncertainty gate');
   }
-  const body = buildReviewBody(normalized);
   const changedLines = collectChangedLines(diff);
-  const { inline: findingComments } = partitionInlineFindings(normalized.findings, changedLines);
+  const {
+    inline: findingComments,
+    bodyOnly: bodyFindings,
+  } = partitionInlineFindings(normalized.findings, changedLines);
   const {
     inline: suggestionComments,
     bodyOnly: unanchoredSuggestions,
@@ -949,6 +949,11 @@ export function prepareReview(report, diff, gates, verification) {
       `report.suggestions[${index}] must cite a PR-relative new-side changed line`,
     );
   }
+  const body = buildReviewBodyFromNormalized(normalized, {
+    bodyFindings,
+    bodySuggestions: [],
+    inlineSuggestionCount: suggestionComments.length,
+  });
   const comments = [...findingComments, ...suggestionComments];
   return { body, comments, event, headSha: normalized.headSha };
 }

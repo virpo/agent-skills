@@ -39,9 +39,12 @@ test('documents the native high-signal PR review contract', async () => {
   assert.match(angles, /style.*naming.*formatting.*omit/is);
   assert.match(angles, /every suggestion.*PR-relative new-side changed line/is);
   assert.match(validation, /keep.*promote.*drop/is);
-  assert.match(report, /careful shake/);
-  assert.match(report, /here's what held and what came loose/);
-  assert.match(report, /Non-blocking suggestions/);
+  assert.match(report, /### 🧨 Blast Radius Buddy[\s\S]*Checking this PR now\. Be right back\./);
+  assert.match(report, /Nothing needs redoing\. Good to go\./);
+  assert.match(report, /Every native review.*small title[\s\S]*one conclusion/is);
+  assert.match(report, /Do not visibly repeat the verdict.*reviewed head.*validation.*coverage/is);
+  assert.match(report, /Each inline comment also starts with `### 🧨 Blast Radius Buddy`/);
+  assert.match(report, /Non-blocking suggestion/);
   assert.match(report, /Approve.*suggestions.*findings.*deferred/is);
   assert.match(report, /suggestions.*at most 3/is);
   assert.match(validation, /confirmed.*narrowed.*downgraded.*unclear.*refuted/is);

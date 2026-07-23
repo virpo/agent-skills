@@ -7,19 +7,19 @@ Use `scripts/review-comment.mjs` for the one marker and `scripts/github-review.m
 Start with exactly:
 
 ```markdown
-🧨 Blast Radius Buddy is giving `<short-sha>` a careful shake; I'll keep this comment updated as the review moves.
+### 🧨 Blast Radius Buddy
 
-- [ ] Three-angle review
-- [ ] Finding validation
-- [ ] Fresh-eyes verification
+Checking this PR now. Be right back.
 
 <!-- blast-radius-buddy -->
 ```
 
-Check each item only after that stage completes. Update the authenticated user's existing marker after each stage; never create separate progress comments. After native review submission, replace the marker with exactly:
+Keep this one marker while the review runs; never create separate progress comments or expose internal stage narration. After native review submission, replace the marker with exactly:
 
 ```markdown
-Review complete for `<short-sha>`: <review-url>
+### 🧨 Blast Radius Buddy
+
+Review complete: [see the result](<review-url>).
 
 <!-- blast-radius-buddy -->
 ```
@@ -29,7 +29,9 @@ Review complete for `<short-sha>`: <review-url>
 Any model, authentication, permission, protocol, reproduction, verification, or submission failure immediately replaces the working marker with this exact body:
 
 ```markdown
-Blast Radius Buddy could not complete the review of `<short-sha>`: <exact reason>.
+### 🧨 Blast Radius Buddy
+
+Review stopped: <exact reason>.
 
 <!-- blast-radius-buddy -->
 ```
@@ -37,7 +39,9 @@ Blast Radius Buddy could not complete the review of `<short-sha>`: <exact reason
 A changed head replaces it with this exact body:
 
 ```markdown
-Blast Radius Buddy stopped because the PR moved from `<old-sha>` to `<new-sha>`. Run it again for the new revision.
+### 🧨 Blast Radius Buddy
+
+The PR changed while I was reviewing it. Run me again on the latest version.
 
 <!-- blast-radius-buddy -->
 ```
@@ -246,23 +250,30 @@ node skills/blast-radius-buddy/scripts/github-review.mjs submit \
 
 `review-history.mjs` scopes each review-linkage fingerprint to its GitHub review ID. It joins that review's root metadata and inline thread, but preserves entries from every separate review even when their IDs or fingerprints match. Cross-run duplicate suppression is host semantic judgment over the complete ledger, including paraphrased findings; fingerprint equality is never proof of semantic equality across runs.
 
-Start the native review with exactly:
+Every native review starts with the same small title:
 
-```text
-🧨 The shake is over; here's what held and what came loose.
+```markdown
+### 🧨 Blast Radius Buddy
 ```
 
-Then report in this order:
+Follow it with one conclusion:
 
-1. verdict and full reviewed head SHA;
-2. actionable findings;
-3. `Non-blocking suggestions` under that exact section heading;
-4. prior-feedback status;
-5. validation performed and its effect;
-6. deferred uncertainties or important out-of-scope follow-ups;
-7. three-angle coverage: security and abuse, system blast radius, feature truth and adjacent regressions.
+- clean approval: `Nothing needs redoing. Good to go.`
+- approval with one verified suggestion: `Good to go. One small suggestion is inline.`
+- one fully anchored finding: `One thing needs another pass; details are inline.`
+- one unanchored finding: `One thing needs another pass:` followed by its root-only detail
+- uncertainty: `One risk needs a human call:` followed by the deferred item
+- one finding plus one deferred risk: `One thing needs another pass, and one risk needs a human call:` followed by the useful details
 
-Anchor an inline comment only to a valid PR-relative new-side changed line. Preserve a finding in the review body when no reliable anchor exists. Every suggestion requires a reliable changed-line anchor; drop it before reporting or stop preparation. A suggestion inline comment is labeled `Non-blocking suggestion` and carries its `BRS001`-style ID in a `blast-radius-buddy-suggestion` marker. Include a suggested-change block only when the replacement is local, mechanical, same-file, and safe to apply without judgment. Keep cross-file, architectural, generated-code, deleted-line, or uncertain fixes as prose suggestions.
+Use natural plural forms for larger counts. End every completed native review with:
+
+```html
+<sub>3 reviewers · 1 fresh-eyes check</sub>
+```
+
+Do not visibly repeat the verdict, reviewed head, prior-feedback recap, validation steps, coverage by angle, or run statistics. Those facts remain in the validated source artifacts and hidden review metadata. Root review copy states the result; inline comments carry anchored details.
+
+Each inline comment also starts with `### 🧨 Blast Radius Buddy`; do not repeat the brand in its body. Anchor an inline comment only to a valid PR-relative new-side changed line. Preserve a finding in the review body when no reliable anchor exists. Every suggestion requires a reliable changed-line anchor; drop it before reporting or stop preparation. A suggestion inline comment is labeled `Non-blocking suggestion` and carries its `BRS001`-style ID in a `blast-radius-buddy-suggestion` marker. Include a suggested-change block only when the replacement is local, mechanical, same-file, and safe to apply without judgment. Keep cross-file, architectural, generated-code, deleted-line, or uncertain fixes as prose suggestions.
 
 ## Event gates
 

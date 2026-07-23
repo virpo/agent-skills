@@ -7,7 +7,7 @@ description: Use when a GitHub pull request needs an independent, high-signal re
 
 ## Core rule
 
-Find consequential defects, not reasons to comment. A finding should be fixed. A suggestion is a concrete improvement that is safe to ignore indefinitely because the pull request is correct without it. Never downgrade a defect to earn approval. Report concrete critical, high, and meaningful medium failures. Ignore style, naming, formatting, optional refactors, generic best practices, and maintainability concerns without an observable consequence.
+Find consequential defects, not reasons to comment. A finding should be fixed. A suggestion is a concrete improvement that is safe to ignore indefinitely because the pull request is correct without it. Never downgrade a defect to earn approval. Report concrete critical, high, and meaningful medium failures. Ignore style, naming, formatting, optional refactors, generic best practices, and maintainability concerns without an observable consequence. Keep each GitHub artifact conclusion-first: one branded title, one result, details only where the author can act.
 
 ## Workflow
 

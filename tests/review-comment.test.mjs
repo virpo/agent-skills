@@ -55,30 +55,57 @@ test('findMarkerComment prefers the Blast Radius Buddy marker during migration',
   assert.equal(findMarkerComment([legacyComment, currentComment]), currentComment);
 });
 
-test('buildProgressBody uses the approved sentence and stage checklist', () => {
+test('buildProgressBody uses one small branded title and one working sentence', () => {
   assert.equal(
     buildProgressBody({ headSha: 'abcdef012345', completedStages: ['review'] }),
     [
-      '🧨 Blast Radius Buddy is giving `abcdef0` a careful shake; I\'ll keep this comment updated as the review moves.',
+      '### 🧨 Blast Radius Buddy',
       '',
-      '- [x] Three-angle review',
-      '- [ ] Finding validation',
-      '- [ ] Fresh-eyes verification',
+      'Checking this PR now. Be right back.',
       '',
       '<!-- blast-radius-buddy -->',
     ].join('\n'),
   );
 });
 
-test('terminal marker bodies preserve the stable marker', () => {
-  assert.match(buildFailureBody({ headSha: 'abcdef0', reason: 'reviewer timed out' }), /could not complete.*reviewer timed out/s);
-  assert.match(buildStaleBody({ oldSha: 'abcdef0', newSha: '1234567' }), /moved from `abcdef0` to `1234567`/);
-  assert.match(buildCompletionBody({ headSha: 'abcdef0', reviewUrl: 'https://github.com/acme/widget/pull/3#pullrequestreview-9' }), /Review complete.*pullrequestreview-9/s);
-  for (const body of [
-    buildFailureBody({ headSha: 'abcdef0', reason: 'reviewer timed out' }),
-    buildStaleBody({ oldSha: 'abcdef0', newSha: '1234567' }),
-    buildCompletionBody({ headSha: 'abcdef0', reviewUrl: 'https://github.com/acme/widget/pull/3#pullrequestreview-9' }),
-  ]) assert.match(body, /<!-- blast-radius-buddy -->/);
+test('terminal marker bodies keep the brand and one conclusion', () => {
+  const failure = buildFailureBody({ headSha: 'abcdef0', reason: 'reviewer timed out' });
+  const stale = buildStaleBody({ oldSha: 'abcdef0', newSha: '1234567' });
+  const completion = buildCompletionBody({
+    headSha: 'abcdef0',
+    reviewUrl: 'https://github.com/acme/widget/pull/3#pullrequestreview-9',
+  });
+
+  assert.equal(
+    failure,
+    [
+      '### 🧨 Blast Radius Buddy',
+      '',
+      'Review stopped: reviewer timed out.',
+      '',
+      NEW_MARKER,
+    ].join('\n'),
+  );
+  assert.equal(
+    stale,
+    [
+      '### 🧨 Blast Radius Buddy',
+      '',
+      'The PR changed while I was reviewing it. Run me again on the latest version.',
+      '',
+      NEW_MARKER,
+    ].join('\n'),
+  );
+  assert.equal(
+    completion,
+    [
+      '### 🧨 Blast Radius Buddy',
+      '',
+      'Review complete: [see the result](https://github.com/acme/widget/pull/3#pullrequestreview-9).',
+      '',
+      NEW_MARKER,
+    ].join('\n'),
+  );
 });
 
 test('main parses render options and writes the progress body', async () => {

@@ -178,28 +178,32 @@ function matchingHeadResponse() {
   return { stdout: JSON.stringify({ headRefOid: HEAD_SHA }) };
 }
 
-test('buildReviewBody uses the approved opening and report order', () => {
+test('buildReviewBody leads with one branded conclusion and only useful detail', () => {
   const body = buildReviewBody(REPORT);
 
-  assert.equal(
-    body.split('\n')[0],
-    "🧨 The shake is over; here's what held and what came loose.",
-  );
-  const headings = [
-    '**Verdict:** Actionable findings',
-    `**Reviewed head:** \`${HEAD_SHA}\``,
-    '## Actionable findings',
-    '## Prior feedback',
-    '## Validation',
-    '## Deferred',
-    '## Coverage',
-  ];
-  let previous = -1;
-  for (const heading of headings) {
-    const index = body.indexOf(heading);
-    assert.ok(index > previous, `${heading} must follow the preceding section`);
-    previous = index;
-  }
+  assert.equal(body.split('\n')[0], '### 🧨 Blast Radius Buddy');
+  assert.match(body, /One thing needs another pass, and one risk needs a human call:/);
+  assert.match(body, /#### BRB001 · \[high \/ high\] The final full page is skipped/);
+  assert.match(body, /Windows path handling remains outside this PR\./);
+  assert.match(body, /<sub>3 reviewers · 1 fresh-eyes check<\/sub>/);
+  assert.doesNotMatch(body, /Verdict|Reviewed head|Prior feedback|Validation|Coverage/);
+});
+
+test('buildReviewBody keeps a clean approval to one conclusion', () => {
+  const body = buildReviewBody(APPROVE_REPORT);
+  const metadata = '<!-- blast-radius-buddy-review:'
+    + '{"headSha":"abcdef0123456789abcdef0123456789abcdef01","findings":[],"suggestions":[]}'
+    + ' -->';
+
+  assert.equal(body, [
+    '### 🧨 Blast Radius Buddy',
+    '',
+    'Nothing needs redoing. Good to go.',
+    '',
+    '<sub>3 reviewers · 1 fresh-eyes check</sub>',
+    '',
+    metadata,
+  ].join('\n'));
 });
 
 test('buildReviewBody strictly rejects malformed or contradictory normalized reports', () => {
@@ -288,14 +292,13 @@ test('Approve reports may contain verified non-blocking suggestions', () => {
   const report = { ...clone(APPROVE_REPORT), suggestions: [clone(REPORT_SUGGESTION)] };
   const gates = { ...clone(APPROVE_GATES), suggestions: [{ id: 'BRS001' }] };
   const prepared = prepareReview(report, SUGGESTION_DIFF, gates, SUGGESTION_VERIFICATION);
+  const visibleBody = prepared.body.replace(/<!-- blast-radius-buddy-review:.* -->/s, '');
 
   assert.equal(prepared.event, 'APPROVE');
-  assert.match(prepared.body, /## Non-blocking suggestions/);
-  assert.match(prepared.body, /### BRS001 · Include the export type in telemetry/);
-  assert.match(prepared.body, /- Improvement: Attach the available export type/);
-  assert.match(prepared.body, /- Benefit: Duration dashboards can be segmented/);
-  assert.match(prepared.body, /- Evidence: `src\/export\.ts:24` — The type is already in scope\./);
+  assert.match(visibleBody, /Good to go\. One small suggestion is inline\./);
+  assert.doesNotMatch(visibleBody, /BRS001|Improvement:|Benefit:|Evidence:/);
   assert.equal(prepared.comments.length, 1);
+  assert.equal(prepared.comments[0].body.split('\n')[0], '### 🧨 Blast Radius Buddy');
   assert.match(prepared.comments[0].body, /Non-blocking suggestion/);
   assert.match(prepared.comments[0].body, SUGGESTION_LINKAGE_MARKER);
 });
@@ -637,7 +640,7 @@ test('buildReviewBody omits empty optional sections and keeps compact metadata s
   assert.doesNotMatch(body, /## Prior feedback/);
   assert.doesNotMatch(body, /## Validation/);
   assert.doesNotMatch(body, /## Deferred/);
-  assert.match(body, /## Coverage/);
+  assert.doesNotMatch(body, /## Coverage/);
 
   const metadataMatch = body.match(/<!-- blast-radius-buddy-review:([\s\S]+) -->$/);
   assert.ok(metadataMatch, 'the compact metadata record must end the body');
@@ -953,11 +956,46 @@ test('prepareReview deterministically writes safe body metadata and inline findi
 
   assert.deepEqual(second, first);
   assert.match(first.body, /<!-- blast-radius-buddy-review:/);
-  assert.match(first.body, /Deleted behavior still needs a body finding/);
+  const visibleBody = first.body.replace(/<!-- blast-radius-buddy-review:.* -->/s, '');
+  assert.doesNotMatch(visibleBody, /The final full page is skipped/);
+  assert.match(visibleBody, /Deleted behavior still needs a body finding/);
   assert.deepEqual(first.comments.map(({ path, line }) => ({ path, line })), [
     { path: 'src/paging.ts', line: 42 },
   ]);
+  assert.equal(first.comments[0].body.split('\n')[0], '### 🧨 Blast Radius Buddy');
   assert.match(first.comments[0].body, REVIEW_LINKAGE_MARKER);
+});
+
+test('prepareReview uses natural plural copy when all findings are inline', () => {
+  const secondFinding = {
+    ...clone(FINDING),
+    id: 'BRB002',
+    title: 'The empty page is still reachable',
+    evidence: [{ path: 'src/paging.ts', line: 43, behavior: 'Returns an extra page.' }],
+  };
+  const report = {
+    ...clone(REPORT),
+    findings: [clone(FINDING), secondFinding],
+    deferred: [],
+  };
+  const gates = {
+    ...clone(COMMENT_GATES),
+    findings: [{ id: 'BRB001' }, { id: 'BRB002' }],
+  };
+  const diff = [
+    '--- a/src/paging.ts',
+    '+++ b/src/paging.ts',
+    '@@ -42,2 +42,2 @@',
+    '-old page count',
+    '-old empty-page guard',
+    '+new page count',
+    '+new empty-page guard',
+  ].join('\n');
+
+  const prepared = prepareReview(report, diff, gates, COMMENT_VERIFICATION);
+
+  assert.match(prepared.body, /2 things need another pass; details are inline\./);
+  assert.equal(prepared.comments.length, 2);
 });
 
 test('prepareReview links root metadata and inline comments with a review-linkage fingerprint', () => {
@@ -1330,7 +1368,7 @@ test('main renders a report file and rejects missing submit files before gh', as
   await main(['render', '--report-file', reportFile, '--output', outputFile]);
   assert.equal(
     (await readFile(outputFile, 'utf8')).split('\n')[0],
-    "🧨 The shake is over; here's what held and what came loose.",
+    '### 🧨 Blast Radius Buddy',
   );
 
   const execute = fakeExecute([]);
