@@ -5,7 +5,10 @@ import test from 'node:test';
 import {
   buildCompletionBody,
   buildFailureBody,
+  buildFinalBody,
+  buildIncompleteBody,
   buildProgressBody,
+  buildRetryBody,
   buildStaleBody,
   findMarkerComment,
   main,
@@ -106,6 +109,58 @@ test('terminal marker bodies keep the brand and one conclusion', () => {
       NEW_MARKER,
     ].join('\n'),
   );
+});
+
+test('automatic marker states bind retries and incomplete runs to the trigger', () => {
+  const retry = buildRetryBody({
+    headSha: 'abcdef012345',
+    triggerId: 'review-requested:91',
+    reason: 'Codex timed out',
+    nextEligibleAt: '2026-08-24T20:15:00.000Z',
+  });
+  const incomplete = buildIncompleteBody({
+    headSha: 'abcdef012345',
+    triggerId: 'review-requested:91',
+    reason: 'Claude authentication failed',
+    action: 'Sign in to Claude Code, then BRB will retry automatically',
+  });
+
+  assert.equal(retry, [
+    '### 🧨 Blast Radius Buddy',
+    '',
+    'Review paused: Codex timed out. Retrying after 2026-08-24 20:15 UTC.',
+    '',
+    '<!-- blast-radius-buddy-run:{"headSha":"abcdef012345","triggerId":"review-requested:91","state":"retry"} -->',
+    '<!-- blast-radius-buddy -->',
+  ].join('\n'));
+  assert.equal(incomplete, [
+    '### 🧨 Blast Radius Buddy',
+    '',
+    'Review stopped: Claude authentication failed. Sign in to Claude Code, then BRB will retry automatically.',
+    '',
+    '<!-- blast-radius-buddy-run:{"headSha":"abcdef012345","triggerId":"review-requested:91","state":"incomplete"} -->',
+    '<!-- blast-radius-buddy -->',
+  ].join('\n'));
+});
+
+test('automatic progress and final bodies carry hidden trigger metadata in one marker', () => {
+  const progress = buildProgressBody({
+    headSha: 'abcdef012345',
+    triggerId: 'review-requested:91',
+  });
+  const final = buildFinalBody({
+    headSha: 'abcdef012345',
+    triggerId: 'review-requested:91',
+    summary: 'Nothing needs redoing. Good to go.',
+    reviewUrl: 'https://github.com/acme/widget/pull/3#pullrequestreview-9',
+  });
+
+  assert.match(progress, /"triggerId":"review-requested:91","state":"working"/);
+  assert.equal(final.match(/### 🧨 Blast Radius Buddy/g)?.length, 1);
+  assert.equal(final.match(/<!-- blast-radius-buddy -->/g)?.length, 1);
+  assert.match(final, /Nothing needs redoing\. Good to go\./);
+  assert.match(final, /\[Native review\]\(https:\/\/github\.com\/acme\/widget\/pull\/3#pullrequestreview-9\)/);
+  assert.match(final, /"triggerId":"review-requested:91","state":"complete"/);
 });
 
 test('main parses render options and writes the progress body', async () => {

@@ -27,6 +27,16 @@ async function assertMissing(path) {
   await assert.rejects(access(path), (error) => error.code === 'ENOENT');
 }
 
+function deferredPromise() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolveValue, rejectValue) => {
+    resolve = resolveValue;
+    reject = rejectValue;
+  });
+  return { promise, resolve, reject };
+}
+
 function fakeChild({ stdout = '', stderr = '', code = 0 } = {}) {
   const child = new EventEmitter();
   child.stdin = new PassThrough();
@@ -197,6 +207,37 @@ test('runReviewer aborts a timed-out attempt and cleans its directory', async ()
   );
 
   assert.equal(observedSignal.aborted, true);
+  await assertMissing(directory);
+});
+
+test('runReviewer propagates an outer whole-run abort without retrying', async () => {
+  const controller = new AbortController();
+  const reason = new Error('whole-run deadline elapsed');
+  let attempts = 0;
+  let directory;
+  const launched = deferredPromise();
+  const result = runReviewer({
+    prompt: 'packet',
+    timeoutMs: 25,
+    retries: 1,
+    signal: controller.signal,
+    launch: ({ cwd, signal }) => {
+      attempts += 1;
+      directory = cwd;
+      launched.resolve();
+      return new Promise((_, reject) => signal.addEventListener(
+        'abort',
+        () => reject(signal.reason),
+        { once: true },
+      ));
+    },
+    validate: () => assert.fail('aborted output must not validate'),
+  });
+
+  await launched.promise;
+  controller.abort(reason);
+  await assert.rejects(result, (error) => error === reason);
+  assert.equal(attempts, 1);
   await assertMissing(directory);
 });
 
@@ -622,6 +663,21 @@ test('launchClaude uses fixed arguments, minimal environment, and stdin prompt b
       ].includes(key))
       .sort(),
   );
+});
+
+test('launchClaude appends an explicit configured model without changing isolation flags', async () => {
+  const calls = [];
+  await launchClaude(
+    { cwd: '/neutral/reviewer', input: 'packet', signal: new AbortController().signal },
+    {
+      model: 'sonnet',
+      spawnImpl: (command, args, options) => {
+        calls.push({ command, args, options });
+        return fakeChild({ stdout: 'normalized output' });
+      },
+    },
+  );
+  assert.deepEqual(calls[0].args, [...CLAUDE_REVIEW_ARGS, '--model', 'sonnet']);
 });
 
 test('launchCodex uses fixed isolated arguments, minimal environment, and stdin prompt bytes', async () => {

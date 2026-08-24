@@ -15,6 +15,8 @@ const STAGES = [
   ['validation', 'Finding validation'],
   ['verification', 'Fresh-eyes verification'],
 ];
+const HEAD_TRIGGER_PATTERN = /^head:[0-9a-f]{40}$/i;
+const REQUEST_TRIGGER_PATTERN = /^review-requested:[1-9]\d*$/;
 
 export function findMarkerComment(comments) {
   const current = comments.find(
@@ -33,16 +35,98 @@ function shortSha(value) {
   return value.slice(0, 7);
 }
 
-export function buildProgressBody({ headSha, completedStages = [] }) {
+function triggerId(value) {
+  if (typeof value !== 'string'
+    || (!HEAD_TRIGGER_PATTERN.test(value) && !REQUEST_TRIGGER_PATTERN.test(value))) {
+    throw new TypeError('triggerId must be a head or review-requested trigger');
+  }
+  return value;
+}
+
+function sentence(value, label) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new TypeError(`${label} must be a non-empty string`);
+  }
+  const trimmed = value.trim();
+  return trimmed.match(/[.!?]$/) ? trimmed : `${trimmed}.`;
+}
+
+function runMetadata({ headSha, triggerId: value, state }) {
+  shortSha(headSha);
+  triggerId(value);
+  return `<!-- blast-radius-buddy-run:${JSON.stringify({
+    headSha,
+    triggerId: value,
+    state,
+  })} -->`;
+}
+
+export function buildProgressBody({ headSha, triggerId: value, completedStages = [] }) {
   shortSha(headSha);
   if (!Array.isArray(completedStages)) {
     throw new TypeError('completedStages must be an array');
   }
-  return [
+  const lines = [
     TITLE,
     '',
     'Checking this PR now. Be right back.',
     '',
+  ];
+  if (value !== undefined) {
+    lines.push(runMetadata({ headSha, triggerId: value, state: 'working' }));
+  }
+  lines.push(MARKER);
+  return lines.join('\n');
+}
+
+export function buildRetryBody({ headSha, triggerId: value, reason, nextEligibleAt }) {
+  const parsed = new Date(nextEligibleAt);
+  if (!Number.isFinite(parsed.getTime())) {
+    throw new TypeError('nextEligibleAt must be a valid date');
+  }
+  const retryAt = `${parsed.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+  return [
+    TITLE,
+    '',
+    `Review paused: ${sentence(reason, 'reason')} Retrying after ${retryAt}.`,
+    '',
+    runMetadata({ headSha, triggerId: value, state: 'retry' }),
+    MARKER,
+  ].join('\n');
+}
+
+export function buildIncompleteBody({ headSha, triggerId: value, reason, action }) {
+  return [
+    TITLE,
+    '',
+    `Review stopped: ${sentence(reason, 'reason')} ${sentence(action, 'action')}`,
+    '',
+    runMetadata({ headSha, triggerId: value, state: 'incomplete' }),
+    MARKER,
+  ].join('\n');
+}
+
+export function buildFinalBody({
+  headSha,
+  triggerId: value,
+  summary,
+  reviewUrl,
+}) {
+  const finalSummary = sentence(summary, 'summary');
+  if (finalSummary.includes(TITLE) || finalSummary.includes(MARKER)) {
+    throw new TypeError('summary must not contain BRB title or marker metadata');
+  }
+  if (typeof reviewUrl !== 'string' || !/^https:\/\/github\.com\//.test(reviewUrl.trim())) {
+    throw new TypeError('reviewUrl must be a GitHub URL');
+  }
+  return [
+    TITLE,
+    '',
+    finalSummary,
+    '',
+    `[Native review](${reviewUrl.trim()})`,
+    '',
+    runMetadata({ headSha, triggerId: value, state: 'complete' }),
     MARKER,
   ].join('\n');
 }
@@ -56,16 +140,20 @@ export function buildFailureBody({ headSha, reason }) {
   return [TITLE, '', `Review stopped: ${conclusion}`, '', MARKER].join('\n');
 }
 
-export function buildStaleBody({ oldSha, newSha }) {
+export function buildStaleBody({ oldSha, newSha, triggerId: value }) {
   shortSha(oldSha);
   shortSha(newSha);
-  return [
+  const lines = [
     TITLE,
     '',
     'The PR changed while I was reviewing it. Run me again on the latest version.',
     '',
-    MARKER,
-  ].join('\n');
+  ];
+  if (value !== undefined) {
+    lines.push(runMetadata({ headSha: oldSha, triggerId: value, state: 'stale' }));
+  }
+  lines.push(MARKER);
+  return lines.join('\n');
 }
 
 export function buildCompletionBody({ headSha, reviewUrl }) {

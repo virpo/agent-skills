@@ -56,7 +56,7 @@ export class ReviewerOutputLimitError extends Error {
   }
 }
 
-function validateRunOptions({ prompt, launch, validate, timeoutMs, retries }) {
+function validateRunOptions({ prompt, launch, validate, timeoutMs, retries, signal }) {
   if (typeof prompt !== 'string' || prompt.trim().length === 0) {
     throw new TypeError('prompt must be a non-empty string');
   }
@@ -67,6 +67,12 @@ function validateRunOptions({ prompt, launch, validate, timeoutMs, retries }) {
   }
   if (retries !== 0 && retries !== 1) {
     throw new TypeError('retries must be 0 or 1');
+  }
+  if (signal !== undefined
+    && (typeof signal !== 'object'
+      || typeof signal.aborted !== 'boolean'
+      || typeof signal.addEventListener !== 'function')) {
+    throw new TypeError('signal must be an AbortSignal');
   }
 }
 
@@ -83,8 +89,10 @@ export async function runReviewer({
   validate,
   timeoutMs = 420_000,
   retries = 1,
+  signal,
 }) {
-  validateRunOptions({ prompt, launch, validate, timeoutMs, retries });
+  validateRunOptions({ prompt, launch, validate, timeoutMs, retries, signal });
+  if (signal?.aborted) throw signal.reason;
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     const directory = await mkdtemp(REVIEW_DIRECTORY_PREFIX);
@@ -94,8 +102,14 @@ export async function runReviewer({
     let timedOut = false;
     let timer;
     const timeoutError = new Error(`Reviewer timed out after ${timeoutMs} ms`);
+    const abortFromParent = () => controller.abort(signal.reason);
 
     try {
+      signal?.addEventListener('abort', abortFromParent, { once: true });
+      if (signal?.aborted) {
+        abortFromParent();
+        throw signal.reason;
+      }
       timer = setTimeout(() => {
         timedOut = true;
         controller.abort(timeoutError);
@@ -108,6 +122,7 @@ export async function runReviewer({
       } catch (error) {
         if (error instanceof UnterminatedReviewerChildError) throw error;
         if (error instanceof ReviewerOutputLimitError) throw error;
+        if (signal?.aborted) throw signal.reason;
         if (timedOut && error === controller.signal.reason) {
           retryableFailure = true;
           throw error;
@@ -118,6 +133,7 @@ export async function runReviewer({
         }
         throw error;
       }
+      if (signal?.aborted) throw signal.reason;
       if (timedOut) {
         retryableFailure = true;
         throw timeoutError;
@@ -140,6 +156,7 @@ export async function runReviewer({
       if (!retryableFailure || attempt === retries) throw error;
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', abortFromParent);
       if (!preserveDirectory) await removeReviewDirectory(directory);
     }
   }
@@ -294,12 +311,17 @@ function launchReviewerChild(
   });
 }
 
-export function launchClaude(options, dependencies = {}) {
+export function launchClaude(options, { model, ...dependencies } = {}) {
+  if (model !== undefined && (typeof model !== 'string' || model.trim().length === 0)) {
+    throw new TypeError('Claude model must be a non-empty string');
+  }
   return launchReviewerChild(options, {
     ...dependencies,
     provider: 'Claude',
     command: 'claude',
-    args: CLAUDE_REVIEW_ARGS,
+    args: model === undefined
+      ? CLAUDE_REVIEW_ARGS
+      : [...CLAUDE_REVIEW_ARGS, '--model', model],
     environmentKeys: CLAUDE_ENV_KEYS,
   });
 }
