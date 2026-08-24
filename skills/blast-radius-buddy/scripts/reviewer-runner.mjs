@@ -22,12 +22,13 @@ import {
 
 const REVIEW_DIRECTORY_PREFIX = join(tmpdir(), 'blast-radius-buddy-review-');
 const MAX_CAPTURE_BYTES = 10 * 1024 * 1024;
-const REVIEW_ENV_KEYS = [
-  'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL',
-  'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN',
+const BASE_REVIEW_ENV_KEYS = ['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL'];
+const CLAUDE_ENV_KEYS = [
+  ...BASE_REVIEW_ENV_KEYS, 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN',
 ];
-const minimalEnvironment = Object.fromEntries(
-  REVIEW_ENV_KEYS.flatMap(
+const CODEX_ENV_KEYS = [...BASE_REVIEW_ENV_KEYS, 'CODEX_HOME', 'OPENAI_API_KEY'];
+const minimalEnvironment = (keys) => Object.fromEntries(
+  keys.flatMap(
     (key) => process.env[key] === undefined ? [] : [[key, process.env[key]]],
   ),
 );
@@ -36,17 +37,21 @@ export const CLAUDE_REVIEW_ARGS = Object.freeze([
   '--safe-mode', '--tools', '', '--disable-slash-commands',
   '--no-session-persistence', '--permission-mode', 'plan', '--print',
 ]);
+export const CODEX_REVIEW_ARGS = Object.freeze([
+  'exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only',
+  '--skip-git-repo-check', '--model', 'gpt-5.6-sol', '-',
+]);
 
 export class UnterminatedReviewerChildError extends Error {
-  constructor(message = 'Claude child did not exit after SIGKILL') {
-    super(message);
+  constructor(provider = 'Claude') {
+    super(`${provider} child did not exit after SIGKILL`);
     this.name = 'UnterminatedReviewerChildError';
   }
 }
 
 export class ReviewerOutputLimitError extends Error {
-  constructor() {
-    super('Claude output exceeded 10 MiB capture limit');
+  constructor(provider = 'Claude') {
+    super(`${provider} output exceeded 10 MiB capture limit`);
     this.name = 'ReviewerOutputLimitError';
   }
 }
@@ -142,9 +147,13 @@ export async function runReviewer({
   throw new Error('Reviewer attempts exhausted');
 }
 
-export function launchClaude(
+function launchReviewerChild(
   { cwd, input, signal },
   {
+    provider,
+    command,
+    args,
+    environmentKeys,
     spawnImpl = spawn,
     termGraceMs = 1_000,
     killGuardMs = 1_000,
@@ -184,7 +193,7 @@ export function launchClaude(
       if (error) rejectLaunch(error);
       else resolveLaunch(value);
     };
-    const unterminated = () => finish(new UnterminatedReviewerChildError());
+    const unterminated = () => finish(new UnterminatedReviewerChildError(provider));
     const startKillGuard = () => {
       killGuardTimer = setTimeout(unterminated, killGuardMs);
     };
@@ -212,7 +221,7 @@ export function launchClaude(
       }, termGraceMs);
     };
     const abort = () => {
-      const error = new Error('Claude review aborted');
+      const error = new Error(`${provider} review aborted`);
       error.name = 'AbortError';
       beginTermination(error, 'SIGTERM');
     };
@@ -221,7 +230,7 @@ export function launchClaude(
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       capturedBytes += bytes.length;
       if (capturedBytes > MAX_CAPTURE_BYTES) {
-        beginTermination(new ReviewerOutputLimitError(), 'SIGKILL');
+        beginTermination(new ReviewerOutputLimitError(provider), 'SIGKILL');
         return;
       }
       target.push(bytes);
@@ -256,16 +265,16 @@ export function launchClaude(
         : `code ${finalCode}`;
       finish(new Error(
         diagnostic.length > 0
-          ? `Claude exited with ${reason}: ${diagnostic}`
-          : `Claude exited with ${reason}`,
+          ? `${provider} exited with ${reason}: ${diagnostic}`
+          : `${provider} exited with ${reason}`,
       ));
     };
 
     try {
-      child = spawnImpl('claude', CLAUDE_REVIEW_ARGS, {
+      child = spawnImpl(command, args, {
         cwd,
         shell: false,
-        env: minimalEnvironment,
+        env: minimalEnvironment(environmentKeys),
       });
       child.stdout.on('data', captureStdout);
       child.stderr.on('data', captureStderr);
@@ -285,12 +294,42 @@ export function launchClaude(
   });
 }
 
+export function launchClaude(options, dependencies = {}) {
+  return launchReviewerChild(options, {
+    ...dependencies,
+    provider: 'Claude',
+    command: 'claude',
+    args: CLAUDE_REVIEW_ARGS,
+    environmentKeys: CLAUDE_ENV_KEYS,
+  });
+}
+
+export function launchCodex(options, { model, ...dependencies } = {}) {
+  if (typeof model !== 'string' || model.trim().length === 0) {
+    throw new TypeError('Codex model must be a non-empty string');
+  }
+  const args = [
+    'exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only',
+    '--skip-git-repo-check', '--model', model, '-',
+  ];
+  return launchReviewerChild(options, {
+    ...dependencies,
+    provider: 'Codex',
+    command: 'codex',
+    args,
+    environmentKeys: CODEX_ENV_KEYS,
+  });
+}
+
 function usage() {
   return [
     'Usage:',
     '  reviewer-runner.mjs run-claude --prompt-file FILE --protocol brb-review --angle ANGLE --timeout-ms NUMBER --output FILE',
     '  reviewer-runner.mjs run-claude --prompt-file FILE --protocol brb-reproduction --expected-ids-file IDS.json --timeout-ms NUMBER --output FILE',
     '  reviewer-runner.mjs run-claude --prompt-file FILE --protocol brb-verification --expected-ids-file IDS.json --timeout-ms NUMBER --output FILE',
+    '  reviewer-runner.mjs run-codex --model MODEL --prompt-file FILE --protocol brb-review --angle ANGLE --timeout-ms NUMBER --output FILE',
+    '  reviewer-runner.mjs run-codex --model MODEL --prompt-file FILE --protocol brb-reproduction --expected-ids-file IDS.json --timeout-ms NUMBER --output FILE',
+    '  reviewer-runner.mjs run-codex --model MODEL --prompt-file FILE --protocol brb-verification --expected-ids-file IDS.json --timeout-ms NUMBER --output FILE',
   ].join('\n');
 }
 
@@ -302,6 +341,7 @@ function readOptions(args) {
     'expected-ids-file',
     'timeout-ms',
     'output',
+    'model',
   ]);
   const options = {};
   for (let index = 0; index < args.length; index += 2) {
@@ -369,9 +409,15 @@ function parseJsonInput(text, input) {
 
 export async function main(args, dependencies = {}) {
   const [command, ...rest] = args;
-  if (command !== 'run-claude') throw new Error(usage());
+  if (command !== 'run-claude' && command !== 'run-codex') throw new Error(usage());
 
   const options = readOptions(rest);
+  let model;
+  if (command === 'run-codex') {
+    model = requireOption(options, 'model');
+  } else if (options.model !== undefined) {
+    throw new TypeError('--model is supported only for run-codex');
+  }
   const promptFile = requireOption(options, 'prompt-file');
   const protocol = requireOption(options, 'protocol');
   const angle = options.angle;
@@ -380,7 +426,9 @@ export async function main(args, dependencies = {}) {
   const timeoutMs = timeoutOption(requireOption(options, 'timeout-ms'));
   const readFile = dependencies.readFile ?? readFileDefault;
   const writeFile = dependencies.writeFile ?? writeFileDefault;
-  const launch = dependencies.launch ?? launchClaude;
+  const launch = dependencies.launch ?? (command === 'run-codex'
+    ? (launchOptions) => launchCodex(launchOptions, { model })
+    : launchClaude);
   let expectedIds;
   if (protocol === 'brb-reproduction') {
     const path = requireOption(options, 'expected-ids-file');

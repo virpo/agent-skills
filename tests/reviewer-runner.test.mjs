@@ -9,7 +9,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import {
   CLAUDE_REVIEW_ARGS,
+  CODEX_REVIEW_ARGS,
   launchClaude,
+  launchCodex,
   main,
   runReviewer,
 } from '../skills/blast-radius-buddy/scripts/reviewer-runner.mjs';
@@ -622,6 +624,98 @@ test('launchClaude uses fixed arguments, minimal environment, and stdin prompt b
   );
 });
 
+test('launchCodex uses fixed isolated arguments, minimal environment, and stdin prompt bytes', async () => {
+  const calls = [];
+  let stdin = '';
+  let resolveInput;
+  const inputEnded = new Promise((resolve) => { resolveInput = resolve; });
+  const spawnImpl = (command, args, options) => {
+    const child = fakeChild({ stdout: 'normalized output', stderr: 'diagnostic' });
+    child.stdin.on('data', (chunk) => { stdin += chunk.toString(); });
+    child.stdin.on('end', resolveInput);
+    calls.push({ command, args, options });
+    return child;
+  };
+
+  const output = await launchCodex(
+    { cwd: '/neutral/reviewer', input: 'prompt bytes ; $(never)', signal: new AbortController().signal },
+    { model: 'gpt-5.6-sol', spawnImpl },
+  );
+  await inputEnded;
+
+  assert.equal(output, 'normalized output');
+  assert.equal(stdin, 'prompt bytes ; $(never)');
+  assert.deepEqual(calls[0].command, 'codex');
+  assert.deepEqual(CODEX_REVIEW_ARGS, [
+    'exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only',
+    '--skip-git-repo-check', '--model', 'gpt-5.6-sol', '-',
+  ]);
+  assert.deepEqual(calls[0].args, CODEX_REVIEW_ARGS);
+  assert.equal(calls[0].args.includes('prompt bytes ; $(never)'), false);
+  assert.equal(calls[0].options.cwd, '/neutral/reviewer');
+  assert.equal(calls[0].options.shell, false);
+  assert.deepEqual(
+    Object.keys(calls[0].options.env).sort(),
+    Object.keys(process.env)
+      .filter((key) => [
+        'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL',
+        'CODEX_HOME', 'OPENAI_API_KEY',
+      ].includes(key))
+      .sort(),
+  );
+});
+
+test('launchCodex labels output-cap and child-exit failures', async () => {
+  let child;
+  await assert.rejects(
+    launchCodex(
+      { cwd: '/neutral/reviewer', input: 'packet', signal: new AbortController().signal },
+      {
+        model: 'gpt-5.6-sol',
+        spawnImpl: () => {
+          child = fakeChild({ stdout: Buffer.alloc(10 * 1024 * 1024 + 1, 97) });
+          return child;
+        },
+      },
+    ),
+    (error) => error.name === 'ReviewerOutputLimitError'
+      && error.message === 'Codex output exceeded 10 MiB capture limit',
+  );
+  assert.equal(child.killedByTest, true);
+
+  await assert.rejects(
+    launchCodex(
+      { cwd: '/neutral/reviewer', input: 'packet', signal: new AbortController().signal },
+      { model: 'gpt-5.6-sol', spawnImpl: () => fakeChild({ stderr: 'bad auth', code: 1 }) },
+    ),
+    /Codex exited with code 1: bad auth/,
+  );
+});
+
+test('launchCodex abort waits for TERM, KILL, and close', async () => {
+  const events = [];
+  const child = controlledChild(events, 'codex');
+  const controller = new AbortController();
+  let settled = false;
+  const result = launchCodex(
+    { cwd: '/neutral/reviewer', input: 'packet', signal: controller.signal },
+    { model: 'gpt-5.6-sol', termGraceMs: 1, killGuardMs: 100, spawnImpl: () => child },
+  );
+  void result.finally(() => { settled = true; }).catch(() => {});
+
+  controller.abort();
+  await child.termSent;
+  await child.killSent;
+  assert.deepEqual(events, ['codex:SIGTERM', 'codex:SIGKILL']);
+  assert.equal(settled, false);
+  child.exit(null, 'SIGKILL');
+  await delay(0);
+  assert.equal(settled, false);
+  child.close(null, 'SIGKILL');
+  await assert.rejects(result, (error) => error.name === 'AbortError'
+    && error.message === 'Codex review aborted');
+});
+
 test('launchClaude rejects output beyond the combined 10 MiB cap', async () => {
   let child;
   await assert.rejects(
@@ -772,6 +866,40 @@ test('run-claude CLI retries once and writes only normalized validated JSON', as
   );
 
   assert.equal(launches, 2);
+  assert.deepEqual(writes, [[
+    './review.json',
+    '{"status":"complete","findings":[],"suggestions":[]}\n',
+    'utf8',
+  ]]);
+});
+
+test('run-codex CLI requires a model and writes only normalized validated JSON', async () => {
+  let launches = 0;
+  const writes = [];
+  const common = [
+    '--prompt-file', './packet.md',
+    '--protocol', 'brb-review',
+    '--angle', FEATURE_ANGLE,
+    '--timeout-ms', '420000',
+    '--output', './review.json',
+  ];
+
+  await assert.rejects(
+    main(['run-codex', ...common], {
+      readFile: async () => 'bounded packet',
+      launch: async () => { launches += 1; return COMPLETE_REVIEW; },
+    }),
+    /--model is required/,
+  );
+  assert.equal(launches, 0);
+
+  await main(['run-codex', '--model', 'gpt-5.6-sol', ...common], {
+    readFile: async () => 'bounded packet',
+    launch: async () => { launches += 1; return COMPLETE_REVIEW; },
+    writeFile: async (...args) => writes.push(args),
+  });
+
+  assert.equal(launches, 1);
   assert.deepEqual(writes, [[
     './review.json',
     '{"status":"complete","findings":[],"suggestions":[]}\n',
