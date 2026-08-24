@@ -18,6 +18,7 @@ import { fakeExecute } from './helpers/fake-execute.mjs';
 
 const HEAD_SHA = 'abcdef0123456789abcdef0123456789abcdef01';
 const REVIEW_URL = 'https://github.com/acme/widget/pull/19#pullrequestreview-9';
+const HEAD_TRIGGER = `head:${HEAD_SHA}`;
 const REVIEW_LINKAGE_MARKER = /<!-- blast-radius-buddy-finding:BRB001:BRBK1_[0-9a-f]{64} -->$/;
 const SUGGESTION_LINKAGE_MARKER = /<!-- blast-radius-buddy-suggestion:BRS001:BRBK1_[0-9a-f]{64} -->$/;
 
@@ -135,6 +136,86 @@ const SUGGESTION_VERIFICATION = {
   suggestions: [REPORT_SUGGESTION],
   promotions: [],
 };
+
+test('prepareReview binds safe head and review-request triggers into native metadata', () => {
+  for (const triggerId of [HEAD_TRIGGER, 'review-requested:91']) {
+    const prepared = prepareReview(
+      clone(APPROVE_REPORT),
+      '',
+      clone(APPROVE_GATES),
+      clone(APPROVE_VERIFICATION),
+      triggerId,
+    );
+    const metadata = JSON.parse(
+      prepared.body.match(/<!-- blast-radius-buddy-review:([\s\S]+) -->$/)[1],
+    );
+    assert.equal(metadata.headSha, HEAD_SHA);
+    assert.equal(metadata.triggerId, triggerId);
+    assert.equal(prepared.triggerId, triggerId);
+  }
+
+  for (const triggerId of [
+    'head:abcdef0',
+    `head:${'f'.repeat(40)}`,
+    'review-requested:0',
+    'review-requested:9007199254740992',
+    'REQUEST_CHANGES',
+  ]) {
+    assert.throws(
+      () => prepareReview(
+        clone(APPROVE_REPORT),
+        '',
+        clone(APPROVE_GATES),
+        clone(APPROVE_VERIFICATION),
+        triggerId,
+      ),
+      /trigger/i,
+    );
+  }
+});
+
+test('same-head different-trigger preparations remain distinct', () => {
+  const first = prepareReview(
+    clone(APPROVE_REPORT), '', clone(APPROVE_GATES), clone(APPROVE_VERIFICATION), HEAD_TRIGGER,
+  );
+  const second = prepareReview(
+    clone(APPROVE_REPORT), '', clone(APPROVE_GATES), clone(APPROVE_VERIFICATION),
+    'review-requested:91',
+  );
+  assert.notEqual(first.body, second.body);
+  assert.equal(first.headSha, second.headSha);
+});
+
+test('submitReview rejects a native state that contradicts the derived event', async () => {
+  const prepared = prepareReview(
+    clone(APPROVE_REPORT), '', clone(APPROVE_GATES), clone(APPROVE_VERIFICATION), HEAD_TRIGGER,
+  );
+  const execute = fakeExecute([
+    matchingHeadResponse(),
+    {
+      stdout: JSON.stringify({
+        id: 9,
+        html_url: REVIEW_URL,
+        state: 'COMMENTED',
+      }),
+    },
+  ]);
+  await assert.rejects(
+    submitReview({
+      repo: 'acme/widget',
+      number: 19,
+      triggerId: HEAD_TRIGGER,
+      report: clone(APPROVE_REPORT),
+      diff: '',
+      gates: clone(APPROVE_GATES),
+      verification: clone(APPROVE_VERIFICATION),
+      body: prepared.body,
+      comments: prepared.comments,
+      execute,
+    }),
+    /native review state.*derived event/i,
+  );
+});
 
 function clone(value) {
   return structuredClone(value);

@@ -222,6 +222,7 @@ Prepare the review body and comments before submission:
 
 ```bash
 node skills/blast-radius-buddy/scripts/github-review.mjs prepare \
+  --trigger-id TRIGGER_ID \
   --report-file REPORT.json \
   --diff-file PR.diff \
   --gates-file GATES.json \
@@ -238,6 +239,7 @@ Submit with the original source artifacts plus the prepared body and comments:
 node skills/blast-radius-buddy/scripts/github-review.mjs submit \
   --repo OWNER/REPO \
   --pr NUMBER \
+  --trigger-id TRIGGER_ID \
   --report-file REPORT.json \
   --diff-file PR.diff \
   --gates-file GATES.json \
@@ -246,7 +248,9 @@ node skills/blast-radius-buddy/scripts/github-review.mjs submit \
   --comments-file COMMENTS.json
 ```
 
-`submit` recomputes and strictly validates `REPORT.json`, `PR.diff`, `GATES.json`, and `VERIFICATION.json`; derives the event again; and rejects any body or comments that differ from that preparation. It accepts no caller-supplied event, head, digest, or approval artifact. Immediately before the GitHub POST, it reads the current PR head and rejects a stale review without posting. It never accepts `REQUEST_CHANGES`.
+`prepare` and `submit` bind automatic runs to exactly one safe trigger: `head:<full-40-hex-SHA>` matching `REPORT.json`, or `review-requested:<positive-safe-event-ID>`. The hidden completion metadata contains `headSha`, `triggerId`, `findings`, and `suggestions`. Legacy review bodies without `triggerId` remain readable and count only as completion of their matching head trigger.
+
+`submit` recomputes and strictly validates `REPORT.json`, `PR.diff`, `GATES.json`, `VERIFICATION.json`, and the trigger; derives the event again; and rejects any body or comments that differ from that preparation. It accepts no caller-supplied event, head, digest, or approval artifact. Immediately before the GitHub POST, it reads the current PR head and rejects a stale review without posting. It rejects a returned native review state that contradicts the derived event and never accepts `REQUEST_CHANGES`.
 
 `review-history.mjs` scopes each review-linkage fingerprint to its GitHub review ID. It joins that review's root metadata and inline thread, but preserves entries from every separate review even when their IDs or fingerprints match. Cross-run duplicate suppression is host semantic judgment over the complete ledger, including paraphrased findings; fingerprint equality is never proof of semantic equality across runs.
 

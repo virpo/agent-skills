@@ -50,10 +50,13 @@ const REPORT_SUGGESTION_FIELDS = [
 const PRIOR_FEEDBACK_FIELDS = ['id', 'status', 'summary', 'path', 'line'];
 const COVERAGE_FIELDS = ['security', 'blastRadius', 'featureTruth'];
 const SUBMISSION_FIELDS = [
-  'repo', 'number', 'report', 'diff', 'gates', 'verification', 'body', 'comments', 'execute',
+  'repo', 'number', 'triggerId', 'report', 'diff', 'gates', 'verification',
+  'body', 'comments', 'execute',
 ];
 const VERIFICATION_ARTIFACT_FIELDS = ['result', 'suggestions', 'promotions'];
 const PROMOTION_FIELDS = ['suggestionId', 'finding'];
+const HEAD_TRIGGER_PATTERN = /^head:([0-9a-f]{40})$/i;
+const REQUEST_TRIGGER_PATTERN = /^review-requested:([1-9]\d*)$/;
 
 const defaultExecute = (command, args) => execFileAsync(command, args, {
   encoding: 'utf8',
@@ -449,9 +452,27 @@ function escapeMetadataJson(value) {
   return JSON.stringify(value).replaceAll('--', '-\\u002d');
 }
 
-function metadataFor(headSha, findings, suggestions) {
+function validateTriggerId(value, headSha) {
+  if (typeof value !== 'string') throw new TypeError('triggerId must be a string');
+  const headMatch = value.match(HEAD_TRIGGER_PATTERN);
+  if (headMatch) {
+    if (headMatch[1].toLowerCase() !== headSha.toLowerCase()) {
+      throw new TypeError('head trigger must match the report head SHA');
+    }
+    return value;
+  }
+  const requestMatch = value.match(REQUEST_TRIGGER_PATTERN);
+  const requestId = requestMatch ? Number(requestMatch[1]) : undefined;
+  if (!Number.isSafeInteger(requestId) || requestId <= 0) {
+    throw new TypeError('triggerId must be a safe head or review-requested trigger');
+  }
+  return value;
+}
+
+function metadataFor(headSha, findings, suggestions, triggerId) {
   return {
     headSha,
+    ...(triggerId === undefined ? {} : { triggerId }),
     findings: findings.map((finding, index) => {
       const { path, line } = findingAnchor(finding);
       return {
@@ -543,6 +564,7 @@ function buildReviewBodyFromNormalized(normalized, {
   bodyFindings = normalized.findings,
   bodySuggestions = normalized.suggestions,
   inlineSuggestionCount = 0,
+  triggerId,
 } = {}) {
   const lines = [TITLE, ''];
   const findingCount = normalized.findings.length;
@@ -597,14 +619,23 @@ function buildReviewBodyFromNormalized(normalized, {
     AUDIT_FOOTER,
     '',
     `<!-- blast-radius-buddy-review:${escapeMetadataJson(
-      metadataFor(normalized.headSha, normalized.findings, normalized.suggestions),
+      metadataFor(
+        normalized.headSha,
+        normalized.findings,
+        normalized.suggestions,
+        triggerId,
+      ),
     )} -->`,
   );
   return lines.join('\n');
 }
 
-export function buildReviewBody(report) {
-  return buildReviewBodyFromNormalized(validateNormalizedReport(report));
+export function buildReviewBody(report, triggerId) {
+  const normalized = validateNormalizedReport(report);
+  const normalizedTriggerId = triggerId === undefined
+    ? undefined
+    : validateTriggerId(triggerId, normalized.headSha);
+  return buildReviewBodyFromNormalized(normalized, { triggerId: normalizedTriggerId });
 }
 
 function hunkHeader(line) {
@@ -871,8 +902,11 @@ function partitionInlineSuggestions(suggestions, changedLines) {
   });
 }
 
-export function prepareReview(report, diff, gates, verification) {
+export function prepareReview(report, diff, gates, verification, triggerId) {
   const normalized = validateNormalizedReport(report);
+  const normalizedTriggerId = triggerId === undefined
+    ? undefined
+    : validateTriggerId(triggerId, normalized.headSha);
   const normalizedVerification = validateVerificationArtifact(verification);
   const reportIds = normalized.findings.map(({ id }) => id).toSorted();
   if (!Array.isArray(gates?.findings) || !Array.isArray(gates?.suggestions)) {
@@ -953,9 +987,16 @@ export function prepareReview(report, diff, gates, verification) {
     bodyFindings,
     bodySuggestions: [],
     inlineSuggestionCount: suggestionComments.length,
+    triggerId: normalizedTriggerId,
   });
   const comments = [...findingComments, ...suggestionComments];
-  return { body, comments, event, headSha: normalized.headSha };
+  return {
+    body,
+    comments,
+    event,
+    headSha: normalized.headSha,
+    ...(normalizedTriggerId === undefined ? {} : { triggerId: normalizedTriggerId }),
+  };
 }
 
 function validateComment(comment, index) {
@@ -978,6 +1019,7 @@ function validateSubmission(options) {
   const {
     repo,
     number,
+    triggerId,
     report,
     diff,
     gates,
@@ -993,7 +1035,7 @@ function validateSubmission(options) {
   const validatedBody = nonEmptyString(body, 'body');
   if (!Array.isArray(comments)) throw new TypeError('comments must be an array');
   if (typeof execute !== 'function') throw new TypeError('execute must be a function');
-  const recomputed = prepareReview(report, diff, gates, verification);
+  const recomputed = prepareReview(report, diff, gates, verification, triggerId);
   if (validatedBody !== recomputed.body
     || JSON.stringify(comments) !== JSON.stringify(recomputed.comments)) {
     throw new TypeError('Prepared review body or comments do not match source artifacts');
@@ -1002,6 +1044,7 @@ function validateSubmission(options) {
     repo,
     number: validatedNumber,
     headSha: recomputed.headSha,
+    triggerId: recomputed.triggerId,
     event: recomputed.event,
     body: recomputed.body,
     comments: recomputed.comments.map(validateComment),
@@ -1009,7 +1052,7 @@ function validateSubmission(options) {
   };
 }
 
-function parseReviewResponse(result) {
+function parseReviewResponse(result, event) {
   const stdout = typeof result === 'string' ? result : result?.stdout;
   let value;
   try {
@@ -1023,7 +1066,18 @@ function parseReviewResponse(result) {
   if (typeof value.html_url !== 'string' || value.html_url.length === 0) {
     throw new Error('Submitted review response has no URL');
   }
-  return { reviewId: value.id, reviewUrl: value.html_url };
+  const state = typeof value.state === 'string' ? value.state.toUpperCase() : undefined;
+  const expectedState = event === 'APPROVE' ? 'APPROVED' : 'COMMENTED';
+  if (state !== undefined && state !== expectedState) {
+    throw new Error(
+      `Native review state ${state} contradicts derived event ${event}`,
+    );
+  }
+  return {
+    reviewId: value.id,
+    reviewUrl: value.html_url,
+    ...(state === undefined ? {} : { reviewState: state }),
+  };
 }
 
 export async function submitReview(options) {
@@ -1056,7 +1110,7 @@ export async function submitReview(options) {
       '--input',
       payloadFile,
     ]);
-    return parseReviewResponse(response);
+    return parseReviewResponse(response, validated.event);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1065,9 +1119,9 @@ export async function submitReview(options) {
 function usage() {
   return [
     'Usage:',
-    '  github-review.mjs prepare --report-file REPORT.json --diff-file PR.diff --gates-file GATES.json --verification-file VERIFICATION.json --body-output BODY.md --comments-output COMMENTS.json',
-    '  github-review.mjs render --report-file REPORT.json --output BODY.md',
-    '  github-review.mjs submit --repo OWNER/REPO --pr NUMBER --report-file REPORT.json --diff-file PR.diff --gates-file GATES.json --verification-file VERIFICATION.json --body-file BODY.md --comments-file COMMENTS.json',
+    '  github-review.mjs prepare [--trigger-id TRIGGER] --report-file REPORT.json --diff-file PR.diff --gates-file GATES.json --verification-file VERIFICATION.json --body-output BODY.md --comments-output COMMENTS.json',
+    '  github-review.mjs render [--trigger-id TRIGGER] --report-file REPORT.json --output BODY.md',
+    '  github-review.mjs submit --repo OWNER/REPO --pr NUMBER [--trigger-id TRIGGER] --report-file REPORT.json --diff-file PR.diff --gates-file GATES.json --verification-file VERIFICATION.json --body-file BODY.md --comments-file COMMENTS.json',
   ].join('\n');
 }
 
@@ -1113,7 +1167,7 @@ export async function main(args, dependencies = {}) {
       rest,
       new Set([
         'report-file', 'diff-file', 'gates-file', 'verification-file',
-        'body-output', 'comments-output',
+        'body-output', 'comments-output', 'trigger-id',
       ]),
     );
     const reportFile = resolve(requireOption(options, 'report-file'));
@@ -1131,18 +1185,18 @@ export async function main(args, dependencies = {}) {
     const report = parseJsonFile(reportText, reportFile);
     const gates = parseJsonFile(gatesText, gatesFile);
     const verification = parseJsonFile(verificationText, verificationFile);
-    const result = prepareReview(report, diff, gates, verification);
+    const result = prepareReview(report, diff, gates, verification, options['trigger-id']);
     await writeFile(bodyOutput, result.body, 'utf8');
     await writeFile(commentsOutput, `${JSON.stringify(result.comments)}\n`, 'utf8');
     return result;
   }
 
   if (command === 'render') {
-    const options = readOptions(rest, new Set(['report-file', 'output']));
+    const options = readOptions(rest, new Set(['report-file', 'output', 'trigger-id']));
     const reportFile = resolve(requireOption(options, 'report-file'));
     const output = resolve(requireOption(options, 'output'));
     const report = parseJsonFile(await readFile(reportFile, 'utf8'), reportFile);
-    await writeFile(output, buildReviewBody(report), 'utf8');
+    await writeFile(output, buildReviewBody(report, options['trigger-id']), 'utf8');
     return;
   }
 
@@ -1151,7 +1205,7 @@ export async function main(args, dependencies = {}) {
       rest,
       new Set([
         'repo', 'pr', 'report-file', 'diff-file', 'gates-file', 'verification-file',
-        'body-file', 'comments-file',
+        'body-file', 'comments-file', 'trigger-id',
       ]),
     );
     const reportFile = resolve(requireOption(options, 'report-file'));
@@ -1175,6 +1229,7 @@ export async function main(args, dependencies = {}) {
     const result = await submitReview({
       repo: requireOption(options, 'repo'),
       number: requireOption(options, 'pr'),
+      triggerId: options['trigger-id'],
       report,
       diff,
       gates,

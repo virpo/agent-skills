@@ -607,10 +607,12 @@ function createGithubAdapter({ execute, repository }) {
         context.diff,
         synthesis.gates,
         synthesis.verification,
+        trigger.triggerId,
       );
       const submitted = await submitReview({
         repo: trigger.repo,
         number: trigger.number,
+        triggerId: trigger.triggerId,
         report: synthesis.report,
         diff: context.diff,
         gates: synthesis.gates,
