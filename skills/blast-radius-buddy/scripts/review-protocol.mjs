@@ -78,6 +78,11 @@ const REVIEW_GATE_FIELDS = [
   'failedRequiredChecks',
   'headUnchanged',
 ];
+const SYNTHESIS_FIELDS = [
+  'status', 'headSha', 'triggerId', 'event', 'report', 'gates', 'verification',
+];
+const SYNTHESIS_COVERAGE_FIELDS = ['security', 'blastRadius', 'featureTruth'];
+const REVIEW_EVENTS = new Set(['COMMENT', 'APPROVE']);
 const SEVERITY_RANK = new Map([
   ['critical', 0],
   ['high', 1],
@@ -610,6 +615,93 @@ export function validateVerificationResult(value, expectedIds) {
     throw new TypeError(`verification.challenges are incompatible with verdict ${verdict}`);
   }
   return { verdict, challenges };
+}
+
+function fullHeadSha(value, path) {
+  if (typeof value !== 'string' || !/^[0-9a-f]{40}$/i.test(value)) {
+    throw new TypeError(`${path} must be a full 40-character commit SHA`);
+  }
+  return value;
+}
+
+function validateSynthesisIdentity(value, expected) {
+  assertObject(expected, 'expected synthesis identity');
+  const expectedHeadSha = fullHeadSha(expected.headSha, 'expected headSha');
+  const expectedTriggerId = nonEmptyString(expected.triggerId, 'expected triggerId');
+  const headSha = fullHeadSha(value.headSha, 'synthesis.headSha');
+  const triggerId = nonEmptyString(value.triggerId, 'synthesis.triggerId');
+  if (headSha !== expectedHeadSha) {
+    throw new TypeError('synthesis head does not match captured head');
+  }
+  if (triggerId !== expectedTriggerId) {
+    throw new TypeError('synthesis trigger does not match queued trigger');
+  }
+  return { headSha, triggerId };
+}
+
+export function validateSynthesisResult(value, expected) {
+  assertObject(value, 'synthesis');
+  if (value.status === 'needs-context') {
+    assertExactFields(
+      value,
+      ['status', 'headSha', 'triggerId', 'missingContext'],
+      'synthesis',
+    );
+    const { headSha, triggerId } = validateSynthesisIdentity(value, expected);
+    if (!Array.isArray(value.missingContext) || value.missingContext.length === 0) {
+      throw new TypeError('synthesis.missingContext must be a non-empty array');
+    }
+    return {
+      status: 'needs-context',
+      headSha,
+      triggerId,
+      missingContext: value.missingContext.map(
+        (item, index) => nonEmptyString(item, `synthesis.missingContext[${index}]`),
+      ),
+    };
+  }
+  if (value.status !== 'complete') {
+    throw new TypeError('synthesis.status is unsupported');
+  }
+  assertExactFields(value, SYNTHESIS_FIELDS, 'synthesis');
+  const { headSha, triggerId } = validateSynthesisIdentity(value, expected);
+  if (!REVIEW_EVENTS.has(value.event)) {
+    throw new TypeError('synthesis.event must be COMMENT or APPROVE');
+  }
+  const event = value.event;
+  assertObject(value.report, 'synthesis.report');
+  if (value.report.headSha !== headSha) {
+    throw new TypeError('synthesis.report.headSha must match synthesis.headSha');
+  }
+  assertExactFields(
+    value.report.coverage,
+    SYNTHESIS_COVERAGE_FIELDS,
+    'synthesis.report.coverage',
+  );
+  for (const field of SYNTHESIS_COVERAGE_FIELDS) {
+    nonEmptyString(value.report.coverage[field], `synthesis.report.coverage.${field}`);
+  }
+  assertObject(value.gates, 'synthesis.gates');
+  const deterministicEvent = decideReviewEvent(value.gates);
+  if (event !== deterministicEvent) {
+    throw new TypeError('synthesis.event does not match the deterministic gate event');
+  }
+  const findingIds = value.gates.findings.map(
+    (finding, index) => stableFindingId(finding.id, `synthesis.gates.findings[${index}].id`),
+  );
+  if (new Set(findingIds).size !== findingIds.length) {
+    throw new TypeError('synthesis.gates.findings must contain unique stable IDs');
+  }
+  assertObject(value.verification, 'synthesis.verification');
+  return {
+    status: 'complete',
+    headSha,
+    triggerId,
+    event,
+    report: value.report,
+    gates: value.gates,
+    verification: value.verification,
+  };
 }
 
 function validReviewGateEnvelope(value) {

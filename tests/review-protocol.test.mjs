@@ -16,8 +16,10 @@ import {
   selectReproductionCandidates,
   validateReproductionResult,
   validateReviewResult,
+  validateSynthesisResult,
   validateVerificationResult,
 } from '../skills/blast-radius-buddy/scripts/review-protocol.mjs';
+import { prepareReview } from '../skills/blast-radius-buddy/scripts/github-review.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -73,6 +75,36 @@ const CLEAN_GATES = {
   failedRequiredChecks: [],
   headUnchanged: true,
 };
+const HEAD = '0123456789abcdef0123456789abcdef01234567';
+const TRIGGER = `head:${HEAD}`;
+const CLEAN_REPORT = {
+  verdict: 'Approve',
+  headSha: HEAD,
+  findings: [],
+  suggestions: [],
+  priorFeedback: [],
+  validation: [],
+  deferred: [],
+  coverage: {
+    security: 'No consequential security or abuse issue found.',
+    blastRadius: 'No consequential system blast-radius issue found.',
+    featureTruth: 'The changed behavior matches the stated feature purpose.',
+  },
+};
+const CLEAN_VERIFICATION = {
+  result: { verdict: 'clean', challenges: [] },
+  suggestions: [],
+  promotions: [],
+};
+const CLEAN_SYNTHESIS = {
+  status: 'complete',
+  headSha: HEAD,
+  triggerId: TRIGGER,
+  event: 'APPROVE',
+  report: CLEAN_REPORT,
+  gates: CLEAN_GATES,
+  verification: CLEAN_VERIFICATION,
+};
 
 function clone(value) {
   return structuredClone(value);
@@ -96,6 +128,136 @@ test('parseProtocolBlock accepts exactly one matching fenced JSON block', () => 
   ];
   for (const output of invalidOutputs) {
     assert.throws(() => parseProtocolBlock(output, 'brb-review'));
+  }
+});
+
+test('synthesis validation accepts a trigger-bound complete result', () => {
+  assert.deepEqual(
+    validateSynthesisResult(CLEAN_SYNTHESIS, { headSha: HEAD, triggerId: TRIGGER }),
+    CLEAN_SYNTHESIS,
+  );
+});
+
+test('synthesis validation accepts a trigger-bound needs-context result', () => {
+  const value = {
+    status: 'needs-context',
+    headSha: HEAD,
+    triggerId: TRIGGER,
+    missingContext: ['The generated route table is absent from the bounded packet.'],
+  };
+  assert.deepEqual(validateSynthesisResult(value, { headSha: HEAD, triggerId: TRIGGER }), value);
+});
+
+test('synthesis validation rejects wrong identity, extra fields, and incomplete coverage', () => {
+  assert.throws(
+    () => validateSynthesisResult(CLEAN_SYNTHESIS, {
+      headSha: 'f'.repeat(40), triggerId: TRIGGER,
+    }),
+    /head.*captured head/i,
+  );
+  assert.throws(
+    () => validateSynthesisResult(CLEAN_SYNTHESIS, {
+      headSha: HEAD, triggerId: 'review-requested:99',
+    }),
+    /trigger.*queued trigger/i,
+  );
+  assert.throws(
+    () => validateSynthesisResult({ ...CLEAN_SYNTHESIS, extra: true }, {
+      headSha: HEAD, triggerId: TRIGGER,
+    }),
+    /unexpected field extra/i,
+  );
+  const report = clone(CLEAN_REPORT);
+  delete report.coverage.security;
+  assert.throws(
+    () => validateSynthesisResult({ ...CLEAN_SYNTHESIS, report }, {
+      headSha: HEAD, triggerId: TRIGGER,
+    }),
+    /coverage\.security.*required/i,
+  );
+});
+
+test('synthesis validation permits only the deterministic COMMENT or APPROVE event', () => {
+  assert.throws(
+    () => validateSynthesisResult({ ...CLEAN_SYNTHESIS, event: 'REQUEST_CHANGES' }, {
+      headSha: HEAD, triggerId: TRIGGER,
+    }),
+    /event.*COMMENT.*APPROVE/i,
+  );
+  assert.throws(
+    () => validateSynthesisResult({
+      ...CLEAN_SYNTHESIS,
+      event: 'COMMENT',
+    }, { headSha: HEAD, triggerId: TRIGGER }),
+    /event.*deterministic gate/i,
+  );
+
+  const gates = { ...CLEAN_GATES, materialUncertainty: true };
+  assert.deepEqual(
+    validateSynthesisResult({
+      ...CLEAN_SYNTHESIS,
+      event: 'COMMENT',
+      report: {
+        ...CLEAN_REPORT,
+        verdict: 'Review completed with uncertainty',
+        deferred: ['Runtime reachability cannot be established from the bounded packet.'],
+      },
+      gates,
+    }, { headSha: HEAD, triggerId: TRIGGER }).event,
+    'COMMENT',
+  );
+  assert.throws(
+    () => validateSynthesisResult({ ...CLEAN_SYNTHESIS, gates }, {
+      headSha: HEAD, triggerId: TRIGGER,
+    }),
+    /event.*deterministic gate/i,
+  );
+});
+
+test('synthesis validation preserves strict preparation inputs without rewriting them', () => {
+  const result = validateSynthesisResult(CLEAN_SYNTHESIS, {
+    headSha: HEAD,
+    triggerId: TRIGGER,
+  });
+  assert.equal(result.report, CLEAN_REPORT);
+  assert.equal(result.gates, CLEAN_GATES);
+  assert.equal(result.verification, CLEAN_VERIFICATION);
+  assert.equal(result.report.headSha, HEAD);
+  const prepared = prepareReview(
+    result.report,
+    '',
+    result.gates,
+    result.verification,
+  );
+  assert.equal(prepared.event, 'APPROVE');
+  assert.equal(prepared.headSha, HEAD);
+  assert.deepEqual(prepared.comments, []);
+
+  const inconsistent = clone(CLEAN_SYNTHESIS);
+  inconsistent.verification.result.verdict = 'uphold';
+  const validated = validateSynthesisResult(inconsistent, {
+    headSha: HEAD,
+    triggerId: TRIGGER,
+  });
+  assert.throws(
+    () => prepareReview(validated.report, '', validated.gates, validated.verification),
+    /Gate verifier verdict must match verification artifact verdict/,
+  );
+});
+
+test('synthesis validation rejects malformed or duplicate stable gate finding IDs', () => {
+  for (const findings of [
+    [{ id: 'finding-1' }],
+    [{ id: 'BRB001' }, { id: 'BRB001' }],
+  ]) {
+    assert.throws(
+      () => validateSynthesisResult({
+        ...CLEAN_SYNTHESIS,
+        event: 'COMMENT',
+        gates: { ...CLEAN_GATES, findings },
+      }, { headSha: HEAD, triggerId: TRIGGER }),
+      /stable finding ID|unique stable IDs/i,
+    );
   }
 });
 
