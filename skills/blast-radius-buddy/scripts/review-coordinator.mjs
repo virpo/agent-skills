@@ -334,6 +334,10 @@ async function requiredChecks({ repo, number, execute }) {
   try {
     result = await execute('gh', args);
   } catch (error) {
+    if (typeof error?.stderr === 'string'
+      && /no required checks reported/i.test(error.stderr)) {
+      return [];
+    }
     if (typeof error?.stdout !== 'string') throw error;
     result = error.stdout;
   }

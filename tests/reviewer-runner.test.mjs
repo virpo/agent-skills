@@ -658,7 +658,7 @@ test('launchClaude uses fixed arguments, minimal environment, and stdin prompt b
     Object.keys(calls[0].options.env).sort(),
     Object.keys(process.env)
       .filter((key) => [
-        'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL',
+        'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'USER', 'LOGNAME', 'SHELL',
         'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN',
       ].includes(key))
       .sort(),
@@ -714,7 +714,7 @@ test('launchCodex uses fixed isolated arguments, minimal environment, and stdin 
     Object.keys(calls[0].options.env).sort(),
     Object.keys(process.env)
       .filter((key) => [
-        'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL',
+        'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'USER', 'LOGNAME', 'SHELL',
         'CODEX_HOME', 'OPENAI_API_KEY',
       ].includes(key))
       .sort(),

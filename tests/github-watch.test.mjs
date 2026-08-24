@@ -172,3 +172,37 @@ test('findEligibleTriggers validates private deployment inputs before GitHub', a
   );
   assert.equal(execute.calls.length, 0);
 });
+
+test('findEligibleTriggers accepts enterprise account suffixes with underscores', async () => {
+  const execute = fakeExecute([result([])]);
+  assert.deepEqual(await findEligibleTriggers({
+    repo: 'Cisco-CollabAI/nex',
+    author: 'mrshu_cisco',
+    reviewer: 'hraska_cisco',
+    execute,
+  }), []);
+  assert.equal(execute.calls.length, 1);
+});
+
+test('findEligibleTriggers treats GitHub zero-required-checks exit as an empty passing set', async () => {
+  const noChecks = Object.assign(new Error('gh exited 1'), {
+    stdout: '',
+    stderr: "no required checks reported on the 'feature' branch\n",
+  });
+  const execute = fakeExecute([
+    result([{ number: 42, url: 'https://github.com/acme/widget/pull/42', isDraft: false, headRefOid: HEAD, author: { login: 'contributor' } }]),
+    noChecks,
+    result([]),
+    result([]),
+  ]);
+  assert.deepEqual(await findEligibleTriggers({
+    repo: 'acme/widget', author: 'contributor', reviewer: 'reviewer', execute,
+  }), [{
+    repo: 'acme/widget',
+    number: 42,
+    url: 'https://github.com/acme/widget/pull/42',
+    headSha: HEAD,
+    triggerId: `head:${HEAD}`,
+    triggerKind: 'head',
+  }]);
+});

@@ -22,7 +22,9 @@ import {
 
 const REVIEW_DIRECTORY_PREFIX = join(tmpdir(), 'blast-radius-buddy-review-');
 const MAX_CAPTURE_BYTES = 10 * 1024 * 1024;
-const BASE_REVIEW_ENV_KEYS = ['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL'];
+const BASE_REVIEW_ENV_KEYS = [
+  'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'USER', 'LOGNAME', 'SHELL',
+];
 const CLAUDE_ENV_KEYS = [
   ...BASE_REVIEW_ENV_KEYS, 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN',
 ];

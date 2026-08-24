@@ -7,7 +7,7 @@ import { resolve } from 'node:path';
 
 const execFileAsync = promisify(execFile);
 const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-const LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
+const LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,37}[A-Za-z0-9])?$/;
 const HEAD_PATTERN = /^[0-9a-f]{40}$/i;
 const HEAD_TRIGGER_PATTERN = /^head:([0-9a-f]{40})$/i;
 const REQUEST_TRIGGER_PATTERN = /^review-requested:([1-9]\d*)$/;
@@ -152,6 +152,10 @@ async function requiredChecks({ repo, number, execute }) {
   try {
     return parseJsonResult(await execute('gh', args), `required checks for PR #${number}`);
   } catch (error) {
+    if (typeof error?.stderr === 'string'
+      && /no required checks reported/i.test(error.stderr)) {
+      return [];
+    }
     if (error && typeof error === 'object' && typeof error.stdout === 'string') {
       try {
         return JSON.parse(error.stdout);
