@@ -215,6 +215,25 @@ test('dry-run captures eligibility but performs no marker or reviewer write', as
   assert.equal(events.at(-1), 'state:release');
 });
 
+test('an oversized packet stops as incomplete instead of retrying forever', async () => {
+  const { events, options } = harness();
+  options.packetBuilder = async () => {
+    const error = new Error('Bounded review packet exceeds 400000 characters');
+    error.code = 'BRB_PACKET_TOO_LARGE';
+    throw error;
+  };
+  options.reviewers.claude = async () => assert.fail('Claude must not start');
+  options.github.submit = async () => assert.fail('GitHub review must not be submitted');
+
+  const result = await runTrigger(options);
+
+  assert.equal(result.status, 'incomplete');
+  assert.ok(events.includes('state:failure:packet-too-large'));
+  assert.ok(events.some((event) => String(event).startsWith('marker:incomplete:')));
+  assert.equal(events.some((event) => String(event).startsWith('marker:retry:')), false);
+  assert.equal(events.at(-1), 'state:release');
+});
+
 test('completion binds state, marker, and submission to the exact trigger without logging packets', async () => {
   const { events, options } = harness();
   const result = await runTrigger(options);

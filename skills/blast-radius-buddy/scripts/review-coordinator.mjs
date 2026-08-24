@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import { findEligibleTriggers } from './github-watch.mjs';
 import {
   buildFinalBody,
+  buildIncompleteBody,
   buildProgressBody,
   buildRetryBody,
   buildStaleBody,
@@ -104,6 +105,7 @@ function validateDependencies(options) {
     ['state.success', state?.success],
     ['state.release', state?.release],
     ['marker.working', marker?.working],
+    ['marker.incomplete', marker?.incomplete],
     ['marker.retry', marker?.retry],
     ['marker.stale', marker?.stale],
     ['marker.complete', marker?.complete],
@@ -126,6 +128,7 @@ function failureCategory(error, signal) {
     return 'deadline';
   }
   if (error instanceof RequiredChecksError) return 'required-checks';
+  if (error?.code === 'BRB_PACKET_TOO_LARGE') return 'packet-too-large';
   return 'review';
 }
 
@@ -277,6 +280,23 @@ export async function runTrigger(options) {
     const category = failureCategory(error, controller.signal);
     const failure = await state.failure(trigger, category, error);
     const reason = error instanceof Error ? error.message : String(error);
+    if (category === 'packet-too-large') {
+      if (markerStarted) {
+        await marker.incomplete({
+          trigger,
+          reason,
+          action: 'Split the pull request or run a supervised review with additional context',
+        });
+      }
+      log(logger, {
+        event: 'incomplete',
+        pr: trigger.number,
+        triggerId: trigger.triggerId,
+        category,
+        reason,
+      });
+      return { status: 'incomplete', reason, category };
+    }
     if (markerStarted) {
       await marker.retry({
         trigger,
@@ -421,6 +441,12 @@ function createMarkerAdapter({ execute }) {
       reason,
       nextEligibleAt,
     })),
+    incomplete: ({ trigger, reason, action }) => update(trigger, buildIncompleteBody({
+      headSha: trigger.headSha,
+      triggerId: trigger.triggerId,
+      reason,
+      action,
+    })),
     stale: ({ trigger, actualHeadSha }) => update(trigger, buildStaleBody({
       oldSha: trigger.headSha,
       newSha: actualHeadSha,
@@ -503,7 +529,9 @@ function buildBoundedPacket(context) {
     context.diff,
   ].join('\n\n');
   if (packet.length > PACKET_LIMIT) {
-    throw new Error(`Bounded review packet exceeds ${PACKET_LIMIT} characters`);
+    const error = new Error(`Bounded review packet exceeds ${PACKET_LIMIT} characters`);
+    error.code = 'BRB_PACKET_TOO_LARGE';
+    throw error;
   }
   return packet;
 }
