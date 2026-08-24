@@ -28,6 +28,13 @@ test('documents the native high-signal PR review contract', async () => {
   assert.match(skill, /one fresh-eyes/i);
   assert.match(skill, /APPROVE/);
   assert.match(skill, /never.*REQUEST_CHANGES/is);
+  assert.match(skill, /explicitly installed automatic deployment.*validated trigger/is);
+  assert.match(skill, /github-watch\.mjs.*review-coordinator\.mjs/is);
+  assert.match(skill, /three.*Claude.*one.*Codex.*synthesis-verification/is);
+  assert.match(skill, /new head.*same-head.*re-review request/is);
+  assert.match(skill, /dead.*expired.*lease.*reclaim/is);
+  assert.match(skill, /5.*15.*30.*60.*minute/is);
+  assert.match(skill, /restart.*sleep|sleep.*restart/is);
   assert.match(skill, /cross-run duplicate suppression.*host semantic judgment.*complete prior-feedback ledger/is);
   assert.match(
     skill,
@@ -120,6 +127,10 @@ test('documents the native high-signal PR review contract', async () => {
     scenario,
     /### Revised run[\s\S]*VERIFICATION\.json[\s\S]*"result"[\s\S]*"suggestions"[\s\S]*"promotions": \[\]/i,
   );
+  assert.match(
+    scenario,
+    /Automatic recovery control[\s\S]*same-head re-review[\s\S]*stuck[\s\S]*restart/is,
+  );
   assert.doesNotMatch(skill, /repair loop/i);
   assert.ok(skill.trim().split(/\s+/).length < 700, 'SKILL.md must stay below 700 words');
   assert.doesNotMatch(readme, /accepted findings[^.\n]*fix/i);
@@ -137,6 +148,9 @@ test('ships every deterministic PR review helper', async () => {
     'review-history.mjs',
     'review-protocol.mjs',
     'reviewer-runner.mjs',
+    'github-watch.mjs',
+    'review-coordinator.mjs',
+    'run-state.mjs',
   ];
 
   await Promise.all(

@@ -11,6 +11,10 @@ The control produced strong domain-specific review logic and test ideas, but did
 - isolate reviewers from untrusted repository configuration; or
 - gate one native review event on structured validation and an unchanged head SHA.
 
+## Automatic recovery control
+
+The no-skill control also treated one completed head as permanent. It did not recognize a same-head re-review request as new work, reclaim a stuck reviewer lease, retry failures with bounded backoff, or restart discovery after the computer restarted or resumed from sleep. The revised automatic contract derives the queue from GitHub every tick, runs three Claude angles before one Codex synthesis-verification, and leaves retry state visible in the single marker.
+
 ## Revised no-skill baseline
 
 ### `clean-pr.md`

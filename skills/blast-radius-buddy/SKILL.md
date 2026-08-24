@@ -21,6 +21,14 @@ Find consequential defects, not reasons to comment. A finding should be fixed. A
 8. Recheck the exact head SHA. On change or incomplete execution, update the marker and submit no native review.
 9. Give the normalized report, captured diff, verification artifact, and explicit gate state to `scripts/github-review.mjs prepare`. Pass the same report, diff, verification, gates, body, and comments to `submit`; it recomputes them, derives `COMMENT` or `APPROVE`, and rechecks the exact head at the write boundary immediately before POST. Update the marker with the final review link.
 
+## Automatic deployment
+
+An explicitly installed automatic deployment authorizes the same one marker and one native review for each validated trigger; it authorizes nothing else. Discover only configured repository/author/reviewer work with `scripts/github-watch.mjs`, then execute it only through `scripts/review-coordinator.mjs`.
+
+Each new head and each same-head re-review request is a distinct trigger. An automatic run is incomplete unless exactly three isolated Claude angles validate before one isolated Codex synthesis-verification. Automated mode runs no invented, open-ended reproduction command: uncertain runtime claims stay deferred and block approval.
+
+Use `scripts/run-state.mjs` for recovery. A dead owner or expired lease is reclaimable. Repeated failures back off for 5, 15, 30, then 60 minutes and remain eligible. A login service plus the next scheduler tick must recover after restart or sleep/wake within minutes. Keep the one marker out of a working state on every retry, stale, incomplete, or completed exit.
+
 ## Stop conditions
 
 - Never submit `REQUEST_CHANGES`.
