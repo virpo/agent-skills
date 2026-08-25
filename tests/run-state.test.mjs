@@ -41,7 +41,7 @@ test('lease acquisition is exclusive while its owner is alive', async () => with
   });
 
   assert.equal(first.acquired, true);
-  assert.equal(first.deadlineAt, 1_000 + 90 * MINUTE);
+  assert.equal(first.deadlineAt, 1_000 + 45 * MINUTE);
   assert.deepEqual(second, { acquired: false, reason: 'owned', ownerId: first.ownerId });
 }));
 

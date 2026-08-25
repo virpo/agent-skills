@@ -35,8 +35,37 @@ function harness(overrides = {}) {
   const context = {
     ...TRIGGER,
     diff: 'diff --git a/src/a.ts b/src/a.ts',
+    files: [{ path: 'src/a.ts' }],
+    changedLines: { 'src/a.ts': [1] },
+    priorLedger: '(no prior feedback)',
     requiredChecksPass: true,
-    packetSource: 'bounded packet SECRET_TOKEN',
+  };
+  const plan = {
+    status: 'complete',
+    headSha: HEAD,
+    triggerId: TRIGGER.triggerId,
+    intent: 'Change one behavior.',
+    boundaries: ['runtime'],
+    clusters: [{
+      id: 'cluster-1',
+      risk: 'high',
+      reason: 'Shared behavior changes.',
+      changedFiles: ['src/a.ts'],
+      relatedFiles: [],
+      tests: [],
+    }],
+    fileDispositions: [{
+      path: 'src/a.ts',
+      disposition: 'material',
+      clusterId: 'cluster-1',
+      reason: 'Behavior changes.',
+    }],
+    assignments: [
+      { angle: ANGLE_SLUGS[0], provider: 'codex', reason: 'Trust boundary review.' },
+      { angle: ANGLE_SLUGS[1], provider: 'claude', reason: 'Highest blast radius.' },
+      { angle: ANGLE_SLUGS[2], provider: 'codex', reason: 'Contract review.' },
+    ],
+    missingContext: [],
   };
   const synthesis = {
     status: 'complete',
@@ -88,12 +117,37 @@ function harness(overrides = {}) {
       };
     },
   };
+  const workspace = {
+    create: async ({ inspect }) => {
+      events.push('workspace:create');
+      return inspect({
+        root: '/tmp/review-workspace',
+        checkout: '/tmp/review-workspace/checkout',
+        artifacts: {
+          pr: '/tmp/review-workspace/artifacts/pr.json',
+          diff: '/tmp/review-workspace/artifacts/diff.patch',
+          changedLines: '/tmp/review-workspace/artifacts/changed-lines.json',
+          priorFeedback: '/tmp/review-workspace/artifacts/prior-feedback.md',
+          agentRules: '/tmp/review-workspace/artifacts/agent-rules.json',
+        },
+        changedFiles: ['src/a.ts'],
+      });
+    },
+  };
   const reviewers = {
-    claude: async ({ angle }) => {
+    assess: async () => {
+      events.push('codex:assess');
+      return plan;
+    },
+    reviewClaude: async ({ angle }) => {
       events.push(`claude:${angle}`);
       return { status: 'complete', findings: [], suggestions: [] };
     },
-    codex: async () => {
+    reviewCodex: async ({ angle }) => {
+      events.push(`codex:${angle}`);
+      return { status: 'complete', findings: [], suggestions: [] };
+    },
+    synthesize: async () => {
       events.push('codex:synthesis');
       return synthesis;
     },
@@ -101,13 +155,14 @@ function harness(overrides = {}) {
   return {
     events,
     context,
+    plan,
     synthesis,
     options: {
       trigger: TRIGGER,
       state,
       marker,
       github,
-      packetBuilder: async () => 'bounded packet SECRET_TOKEN',
+      workspace,
       reviewers,
       logger: { log: (record) => events.push({ log: record }) },
       ...overrides,
@@ -115,27 +170,27 @@ function harness(overrides = {}) {
   };
 }
 
-test('three Claude angles start in parallel before one Codex synthesis', async () => {
+test('Codex assesses scope before two Codex and one Opus angle start in parallel', async () => {
   const reviews = new Map(ANGLE_SLUGS.map((angle) => [angle, deferred()]));
   const { events, options } = harness();
-  options.reviewers = {
-    claude: ({ angle }) => {
+  options.reviewers.reviewCodex = ({ angle }) => {
+    events.push(`codex:${angle}`);
+    return reviews.get(angle).promise;
+  };
+  options.reviewers.reviewClaude = ({ angle }) => {
       events.push(`claude:${angle}`);
       return reviews.get(angle).promise;
-    },
-    codex: async () => {
-      events.push('codex:synthesis');
-      return harness().synthesis;
-    },
   };
 
   const resultPromise = runTrigger(options);
   await delay(0);
-  assert.deepEqual(events.filter((event) => typeof event === 'string').slice(0, 4), [
+  assert.deepEqual(events.filter((event) => typeof event === 'string').slice(0, 6), [
     'marker:working',
-    'claude:security-and-abuse',
+    'workspace:create',
+    'codex:assess',
+    'codex:security-and-abuse',
     'claude:system-blast-radius',
-    'claude:feature-truth-and-adjacent-regressions',
+    'codex:feature-truth-and-adjacent-regressions',
   ]);
   assert.equal(events.includes('codex:synthesis'), false);
   for (const review of reviews.values()) {
@@ -143,12 +198,13 @@ test('three Claude angles start in parallel before one Codex synthesis', async (
   }
   const result = await resultPromise;
   assert.equal(result.status, 'complete');
-  assert.ok(events.indexOf('codex:synthesis') > events.indexOf('claude:feature-truth-and-adjacent-regressions'));
+  assert.ok(events.indexOf('codex:synthesis') > events.indexOf('codex:feature-truth-and-adjacent-regressions'));
 });
 
-test('coordinator exports model-specific review and recovery timing', () => {
-  assert.equal(coordinatorModule.CLAUDE_TIMEOUT_MS, 25 * 60_000);
-  assert.equal(coordinatorModule.CODEX_TIMEOUT_MS, 15 * 60_000);
+test('coordinator exports bounded stage timing', () => {
+  assert.equal(coordinatorModule.ASSESSMENT_BUDGET_MS, 10 * 60_000);
+  assert.equal(coordinatorModule.ANGLE_WAVE_BUDGET_MS, 10 * 60_000);
+  assert.equal(coordinatorModule.SYNTHESIS_BUDGET_MS, 10 * 60_000);
   assert.equal(coordinatorModule.REVIEWER_INACTIVITY_TIMEOUT_MS, 5 * 60_000);
   assert.equal(coordinatorModule.HEARTBEAT_INTERVAL_MS, 60_000);
 });
@@ -162,7 +218,8 @@ test('runTrigger validates the heartbeat interval before acquiring a lease', asy
 test('long model stages heartbeat the fixed lease until completion', async () => {
   const reviews = new Map(ANGLE_SLUGS.map((angle) => [angle, deferred()]));
   const { events, options } = harness({ heartbeatIntervalMs: 5 });
-  options.reviewers.claude = ({ angle }) => reviews.get(angle).promise;
+  options.reviewers.reviewCodex = ({ angle }) => reviews.get(angle).promise;
+  options.reviewers.reviewClaude = ({ angle }) => reviews.get(angle).promise;
 
   const resultPromise = runTrigger(options);
   await delay(18);
@@ -190,12 +247,14 @@ test('a rejected heartbeat aborts every angle and schedules safe recovery', asyn
     events.push('state:heartbeat');
     throw new Error('lease heartbeat failed');
   };
-  options.reviewers.claude = ({ signal }) => new Promise((_, reject) => {
+  const waitForAbort = ({ signal }) => new Promise((_, reject) => {
     signal.addEventListener('abort', () => {
       abortedAngles += 1;
       reject(signal.reason);
     }, { once: true });
   });
+  options.reviewers.reviewCodex = waitForAbort;
+  options.reviewers.reviewClaude = waitForAbort;
   options.github.submit = async () => assert.fail('native review must not be submitted');
 
   const result = await runTrigger(options);
@@ -207,27 +266,40 @@ test('a rejected heartbeat aborts every angle and schedules safe recovery', asyn
   assert.equal(events.at(-1), 'state:release');
 });
 
-test('a failed Claude angle aborts siblings, skips Codex, and remains retryable', async () => {
+test('a failed Opus angle gets exactly one Codex replacement for the same angle', async () => {
   const { events, options } = harness();
-  options.reviewers = {
-    claude: async ({ angle, signal }) => {
-      events.push(`claude:${angle}`);
-      if (angle === ANGLE_SLUGS[0]) throw new Error('Claude model unavailable');
-      await new Promise((_, reject) => signal.addEventListener(
-        'abort',
-        () => reject(signal.reason),
-        { once: true },
-      ));
-    },
-    codex: async () => assert.fail('Codex must not start'),
+  let opusCalls = 0;
+  const originalCodex = options.reviewers.reviewCodex;
+  options.reviewers.reviewClaude = async ({ angle }) => {
+    opusCalls += 1;
+    events.push(`claude:${angle}:failed`);
+    throw new Error('Opus unavailable');
+  };
+  options.reviewers.reviewCodex = async (request) => {
+    if (request.replacementFor === 'claude') events.push(`codex:replacement:${request.angle}`);
+    return originalCodex(request);
   };
 
   const result = await runTrigger(options);
+  assert.equal(result.status, 'complete');
+  assert.equal(opusCalls, 1);
+  assert.ok(events.includes('codex:replacement:system-blast-radius'));
+  assert.ok(events.includes('codex:synthesis'));
+});
+
+test('an exhausted Codex angle blocks synthesis and remains retryable', async () => {
+  const { events, options } = harness();
+  options.reviewers.reviewCodex = async ({ angle }) => {
+    events.push(`codex:${angle}:failed`);
+    if (angle === ANGLE_SLUGS[0]) throw new Error('Codex unavailable');
+    return { status: 'complete', findings: [], suggestions: [] };
+  };
+  options.reviewers.synthesize = async () => assert.fail('synthesis must not start');
+
+  const result = await runTrigger(options);
   assert.equal(result.status, 'retry-scheduled');
-  assert.match(result.reason, /Claude model unavailable/);
-  assert.ok(events.some((event) => event === 'state:failure:review'));
-  assert.ok(events.some((event) => String(event).startsWith('marker:retry:')));
-  assert.equal(events.at(-1), 'state:release');
+  assert.match(result.reason, /Codex unavailable/);
+  assert.ok(events.includes('state:failure:review'));
 });
 
 test('whole-run deadline aborts outstanding reviewers and schedules recovery', async () => {
@@ -237,9 +309,10 @@ test('whole-run deadline aborts outstanding reviewers and schedules recovery', a
     ownerId: 'owner-1',
     deadlineAt: Date.now() + 5,
   });
-  options.reviewers.claude = async ({ signal }) => new Promise((_, reject) => {
+  options.reviewers.reviewCodex = async ({ signal }) => new Promise((_, reject) => {
     signal.addEventListener('abort', () => reject(signal.reason), { once: true });
   });
+  options.reviewers.reviewClaude = options.reviewers.reviewCodex;
 
   const result = await runTrigger(options);
   assert.equal(result.status, 'retry-scheduled');
@@ -268,7 +341,7 @@ test('stale heads and required-check regressions perform no native review write'
 
 test('dry-run captures eligibility but performs no marker or reviewer write', async () => {
   const { events, options } = harness({ dryRun: true });
-  options.reviewers.claude = async () => assert.fail('reviewer must not start');
+  options.reviewers.assess = async () => assert.fail('reviewer must not start');
   options.github.submit = async () => assert.fail('GitHub write must not happen');
   const result = await runTrigger(options);
 
@@ -277,22 +350,19 @@ test('dry-run captures eligibility but performs no marker or reviewer write', as
   assert.equal(events.at(-1), 'state:release');
 });
 
-test('an oversized packet stops as incomplete instead of retrying forever', async () => {
+test('a review workspace failure schedules retry without launching models', async () => {
   const { events, options } = harness();
-  options.packetBuilder = async () => {
-    const error = new Error('Bounded review packet exceeds 400000 characters');
-    error.code = 'BRB_PACKET_TOO_LARGE';
-    throw error;
+  options.workspace.create = async () => {
+    throw new Error('Review workspace head mismatch');
   };
-  options.reviewers.claude = async () => assert.fail('Claude must not start');
+  options.reviewers.assess = async () => assert.fail('Codex must not start');
   options.github.submit = async () => assert.fail('GitHub review must not be submitted');
 
   const result = await runTrigger(options);
 
-  assert.equal(result.status, 'incomplete');
-  assert.ok(events.includes('state:failure:packet-too-large'));
-  assert.ok(events.some((event) => String(event).startsWith('marker:incomplete:')));
-  assert.equal(events.some((event) => String(event).startsWith('marker:retry:')), false);
+  assert.equal(result.status, 'retry-scheduled');
+  assert.ok(events.includes('state:failure:review'));
+  assert.ok(events.some((event) => String(event).startsWith('marker:retry:')));
   assert.equal(events.at(-1), 'state:release');
 });
 
@@ -307,7 +377,7 @@ test('completion binds state, marker, and submission to the exact trigger withou
   assert.ok(events.includes(`state:success:${TRIGGER.triggerId}`));
   assert.doesNotMatch(
     serializedLogs,
-    /bounded packet|SECRET_TOKEN|diff --git|brb-review|CLAUDE_SECRET|CODEX_SECRET/,
+    /diff --git|brb-review|CLAUDE_SECRET|CODEX_SECRET/,
   );
 });
 

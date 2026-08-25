@@ -9,7 +9,7 @@ import {
 } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 
-const DEFAULT_DEADLINE_MS = 90 * 60_000;
+const DEFAULT_DEADLINE_MS = 45 * 60_000;
 const BACKOFF_MS = [5, 15, 30, 60].map((minutes) => minutes * 60_000);
 const LEASE_FIELDS = [
   'triggerKey', 'pid', 'ownerId', 'startedAt', 'deadlineAt', 'heartbeatAt',
