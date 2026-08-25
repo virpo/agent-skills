@@ -8,7 +8,7 @@ import {
   writeFile as writeFileDefault,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -39,6 +39,12 @@ export const CLAUDE_REVIEW_ARGS = Object.freeze([
   '--safe-mode', '--tools', '', '--disable-slash-commands',
   '--no-session-persistence', '--permission-mode', 'plan', '--print',
   '--output-format', 'stream-json', '--include-partial-messages', '--verbose',
+]);
+export const CLAUDE_REPOSITORY_REVIEW_ARGS = Object.freeze([
+  '--safe-mode', '--tools', 'Read,Glob,Grep', '--disable-slash-commands',
+  '--no-session-persistence', '--permission-mode', 'dontAsk', '--print',
+  '--output-format', 'stream-json', '--include-partial-messages', '--verbose',
+  '--effort', 'medium', '--prompt-suggestions', 'false',
 ]);
 export const CODEX_REVIEW_ARGS = Object.freeze([
   'exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only',
@@ -75,6 +81,9 @@ function validateRunOptions({
   retries,
   signal,
   onAttemptEvent,
+  stageDeadlineAt,
+  workingDirectory,
+  now,
 }) {
   if (typeof prompt !== 'string' || prompt.trim().length === 0) {
     throw new TypeError('prompt must be a non-empty string');
@@ -101,6 +110,15 @@ function validateRunOptions({
   if (onAttemptEvent !== undefined && typeof onAttemptEvent !== 'function') {
     throw new TypeError('onAttemptEvent must be a function');
   }
+  if (stageDeadlineAt !== undefined
+    && (!Number.isSafeInteger(stageDeadlineAt) || stageDeadlineAt <= 0)) {
+    throw new TypeError('stageDeadlineAt must be a positive safe integer');
+  }
+  if (workingDirectory !== undefined
+    && (typeof workingDirectory !== 'string' || !isAbsolute(workingDirectory))) {
+    throw new TypeError('workingDirectory must be an absolute path');
+  }
+  if (typeof now !== 'function') throw new TypeError('now must be a function');
 }
 
 async function removeReviewDirectory(directory) {
@@ -119,6 +137,9 @@ export async function runReviewer({
   retries = 1,
   signal,
   onAttemptEvent,
+  stageDeadlineAt,
+  workingDirectory,
+  now = () => Date.now(),
 }) {
   validateRunOptions({
     prompt,
@@ -129,25 +150,37 @@ export async function runReviewer({
     retries,
     signal,
     onAttemptEvent,
+    stageDeadlineAt,
+    workingDirectory,
+    now,
   });
   if (signal?.aborted) throw signal.reason;
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
-    const directory = await mkdtemp(REVIEW_DIRECTORY_PREFIX);
+    const remainingStageMs = stageDeadlineAt === undefined
+      ? timeoutMs
+      : stageDeadlineAt - now();
+    if (remainingStageMs <= 0) throw new Error('Reviewer stage deadline elapsed');
+    const attemptTimeoutMs = Math.min(timeoutMs, remainingStageMs);
+    const attemptInactivityTimeoutMs = Math.min(inactivityTimeoutMs, attemptTimeoutMs);
+    const ownsDirectory = workingDirectory === undefined;
+    const directory = ownsDirectory
+      ? await mkdtemp(REVIEW_DIRECTORY_PREFIX)
+      : workingDirectory;
     const controller = new AbortController();
     let preserveDirectory = false;
     let retryableFailure = false;
     let watchdogError;
     let hardTimer;
     let inactivityTimer;
-    let lastActivityAt = Date.now();
-    const timeoutError = new Error(`Reviewer timed out after ${timeoutMs} ms`);
+    let lastActivityAt = now();
+    const timeoutError = new Error(`Reviewer timed out after ${attemptTimeoutMs} ms`);
     const abortFromParent = () => controller.abort(signal.reason);
     const event = (state, failureCategory = null) => onAttemptEvent?.({
       state,
       attempt: attempt + 1,
       failureCategory,
-      lastActivityAgeMs: Math.max(0, Date.now() - lastActivityAt),
+      lastActivityAgeMs: Math.max(0, now() - lastActivityAt),
     });
     const abortFromWatchdog = (error) => {
       if (controller.signal.aborted) return;
@@ -155,11 +188,11 @@ export async function runReviewer({
       controller.abort(error);
     };
     const resetInactivityTimer = () => {
-      lastActivityAt = Date.now();
+      lastActivityAt = now();
       clearTimeout(inactivityTimer);
       inactivityTimer = setTimeout(
-        () => abortFromWatchdog(new ReviewerInactivityError(inactivityTimeoutMs)),
-        inactivityTimeoutMs,
+        () => abortFromWatchdog(new ReviewerInactivityError(attemptInactivityTimeoutMs)),
+        attemptInactivityTimeoutMs,
       );
     };
 
@@ -170,7 +203,7 @@ export async function runReviewer({
         abortFromParent();
         throw signal.reason;
       }
-      hardTimer = setTimeout(() => abortFromWatchdog(timeoutError), timeoutMs);
+      hardTimer = setTimeout(() => abortFromWatchdog(timeoutError), attemptTimeoutMs);
       resetInactivityTimer();
       let output;
       try {
@@ -229,7 +262,7 @@ export async function runReviewer({
       clearTimeout(hardTimer);
       clearTimeout(inactivityTimer);
       signal?.removeEventListener('abort', abortFromParent);
-      if (!preserveDirectory) await removeReviewDirectory(directory);
+      if (ownsDirectory && !preserveDirectory) await removeReviewDirectory(directory);
     }
   }
 
@@ -408,29 +441,44 @@ function parseClaudeStream(text) {
   return results[0].result;
 }
 
-export async function launchClaude(options, { model, ...dependencies } = {}) {
+export async function launchClaude(
+  options,
+  { model, repositoryAccess = false, ...dependencies } = {},
+) {
   if (model !== undefined && (typeof model !== 'string' || model.trim().length === 0)) {
     throw new TypeError('Claude model must be a non-empty string');
+  }
+  if (typeof repositoryAccess !== 'boolean') {
+    throw new TypeError('repositoryAccess must be a boolean');
   }
   const output = await launchReviewerChild(options, {
     ...dependencies,
     provider: 'Claude',
     command: 'claude',
-    args: model === undefined
-      ? CLAUDE_REVIEW_ARGS
-      : [...CLAUDE_REVIEW_ARGS, '--model', model],
+    args: [
+      ...(repositoryAccess ? CLAUDE_REPOSITORY_REVIEW_ARGS : CLAUDE_REVIEW_ARGS),
+      ...(model === undefined ? [] : ['--model', model]),
+    ],
     environmentKeys: CLAUDE_ENV_KEYS,
   });
   return parseClaudeStream(output);
 }
 
-export function launchCodex(options, { model, ...dependencies } = {}) {
+export function launchCodex(
+  options,
+  { model, repositoryAccess = false, ...dependencies } = {},
+) {
   if (typeof model !== 'string' || model.trim().length === 0) {
     throw new TypeError('Codex model must be a non-empty string');
   }
+  if (typeof repositoryAccess !== 'boolean') {
+    throw new TypeError('repositoryAccess must be a boolean');
+  }
   const args = [
     'exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only',
-    '--skip-git-repo-check', '--model', model, '-',
+    '--skip-git-repo-check', '--model', model,
+    ...(repositoryAccess ? ['-C', options.cwd] : []),
+    '-',
   ];
   return launchReviewerChild(options, {
     ...dependencies,

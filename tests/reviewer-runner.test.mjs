@@ -9,6 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import {
   CLAUDE_REVIEW_ARGS,
+  CLAUDE_REPOSITORY_REVIEW_ARGS,
   CODEX_REVIEW_ARGS,
   launchClaude,
   launchCodex,
@@ -705,10 +706,48 @@ test('runReviewer validates inputs before creating or launching an attempt', asy
     { prompt: 'packet', launch, validate, timeoutMs: 10, inactivityTimeoutMs: 11 },
     { prompt: 'packet', launch, validate, onAttemptEvent: 'invalid' },
     { prompt: 'packet', launch, validate, retries: 2 },
+    { prompt: 'packet', launch, validate, workingDirectory: 'relative/path' },
+    { prompt: 'packet', launch, validate, stageDeadlineAt: 0 },
   ];
 
   for (const options of invalid) await assert.rejects(runReviewer(options), TypeError);
   assert.equal(launches, 0);
+});
+
+test('runReviewer reuses an explicit workspace and shares one stage deadline across retries', async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const delays = [];
+  let current = 1_000;
+  let attempts = 0;
+  globalThis.setTimeout = (callback, delayMs, ...args) => {
+    delays.push(delayMs);
+    return originalSetTimeout(callback, delayMs, ...args);
+  };
+  try {
+    const result = await runReviewer({
+      prompt: 'packet',
+      launch: async ({ cwd }) => {
+        attempts += 1;
+        assert.equal(cwd, '/exact/review-workspace');
+        if (attempts === 1) {
+          current = 1_090;
+          return 'malformed';
+        }
+        return COMPLETE_REVIEW;
+      },
+      validate: (output) => parseProtocolBlock(output, 'brb-review'),
+      timeoutMs: 100,
+      inactivityTimeoutMs: 100,
+      stageDeadlineAt: 1_100,
+      workingDirectory: '/exact/review-workspace',
+      now: () => current,
+    });
+    assert.deepEqual(result, { status: 'complete', findings: [], suggestions: [] });
+    assert.equal(attempts, 2);
+    assert.deepEqual(delays, [100, 100, 10, 10]);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
 });
 
 test('launchClaude uses fixed arguments, minimal environment, and stdin prompt bytes', async () => {
@@ -780,6 +819,38 @@ test('launchClaude streams activity and returns the final result text', async ()
   assert.equal(output, COMPLETE_REVIEW);
   assert.deepEqual(calls[0].args, [...CLAUDE_REVIEW_ARGS, '--model', 'opus']);
   assert.ok(activity.length >= 2);
+});
+
+test('launchClaude repository mode pins Opus medium with read-only tools only', async () => {
+  const calls = [];
+  const output = await launchClaude(
+    {
+      cwd: '/exact/review-workspace',
+      input: 'inspect checkout/',
+      signal: new AbortController().signal,
+    },
+    {
+      model: 'opus',
+      repositoryAccess: true,
+      spawnImpl: (command, args, options) => {
+        calls.push({ command, args, options });
+        return fakeChild({ stdout: claudeStream() });
+      },
+    },
+  );
+
+  assert.equal(output, COMPLETE_REVIEW);
+  assert.deepEqual(CLAUDE_REPOSITORY_REVIEW_ARGS, [
+    '--safe-mode', '--tools', 'Read,Glob,Grep', '--disable-slash-commands',
+    '--no-session-persistence', '--permission-mode', 'dontAsk', '--print',
+    '--output-format', 'stream-json', '--include-partial-messages', '--verbose',
+    '--effort', 'medium', '--prompt-suggestions', 'false',
+  ]);
+  assert.deepEqual(calls[0].args, [
+    ...CLAUDE_REPOSITORY_REVIEW_ARGS, '--model', 'opus',
+  ]);
+  assert.equal(calls[0].args.some((value) => /Bash|Edit|Write|Web|GitHub/.test(value)), false);
+  assert.equal(calls[0].options.cwd, '/exact/review-workspace');
 });
 
 test('launchClaude rejects a stream without one successful result', async () => {
@@ -863,6 +934,35 @@ test('launchCodex uses fixed isolated arguments, minimal environment, and stdin 
       ].includes(key))
       .sort(),
   );
+});
+
+test('launchCodex repository mode roots the read-only sandbox at the neutral workspace', async () => {
+  const calls = [];
+  const output = await launchCodex(
+    {
+      cwd: '/exact/review-workspace',
+      input: 'inspect checkout/',
+      signal: new AbortController().signal,
+    },
+    {
+      model: 'gpt-5.6-sol',
+      repositoryAccess: true,
+      spawnImpl: (command, args, options) => {
+        calls.push({ command, args, options });
+        return fakeChild({ stdout: 'complete' });
+      },
+    },
+  );
+
+  assert.equal(output, 'complete');
+  assert.deepEqual(calls[0].args, [
+    'exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only',
+    '--skip-git-repo-check', '--model', 'gpt-5.6-sol',
+    '-C', '/exact/review-workspace', '-',
+  ]);
+  assert.equal(calls[0].options.cwd, '/exact/review-workspace');
+  assert.equal(Object.hasOwn(calls[0].options.env, 'GH_TOKEN'), false);
+  assert.equal(Object.hasOwn(calls[0].options.env, 'GITHUB_TOKEN'), false);
 });
 
 test('launchCodex labels output-cap and child-exit failures', async () => {
