@@ -38,6 +38,7 @@ const minimalEnvironment = (keys) => Object.fromEntries(
 export const CLAUDE_REVIEW_ARGS = Object.freeze([
   '--safe-mode', '--tools', '', '--disable-slash-commands',
   '--no-session-persistence', '--permission-mode', 'plan', '--print',
+  '--output-format', 'stream-json', '--include-partial-messages',
 ]);
 export const CODEX_REVIEW_ARGS = Object.freeze([
   'exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only',
@@ -120,7 +121,12 @@ export async function runReviewer({
       try {
         // Injected launchers must honor AbortSignal and settle only after any
         // process or resource they own has stopped using this attempt cwd.
-        output = await launch({ cwd: directory, input: prompt, signal: controller.signal });
+        output = await launch({
+          cwd: directory,
+          input: prompt,
+          signal: controller.signal,
+          onActivity: () => {},
+        });
       } catch (error) {
         if (error instanceof UnterminatedReviewerChildError) throw error;
         if (error instanceof ReviewerOutputLimitError) throw error;
@@ -167,7 +173,7 @@ export async function runReviewer({
 }
 
 function launchReviewerChild(
-  { cwd, input, signal },
+  { cwd, input, signal, onActivity },
   {
     provider,
     command,
@@ -178,6 +184,9 @@ function launchReviewerChild(
     killGuardMs = 1_000,
   } = {},
 ) {
+  if (onActivity !== undefined && typeof onActivity !== 'function') {
+    throw new TypeError('onActivity must be a function');
+  }
   return new Promise((resolveLaunch, rejectLaunch) => {
     let settled = false;
     let capturedBytes = 0;
@@ -246,6 +255,7 @@ function launchReviewerChild(
     };
     const capture = (target) => (chunk) => {
       if (settled || termination) return;
+      onActivity?.();
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       capturedBytes += bytes.length;
       if (capturedBytes > MAX_CAPTURE_BYTES) {
@@ -313,11 +323,32 @@ function launchReviewerChild(
   });
 }
 
-export function launchClaude(options, { model, ...dependencies } = {}) {
+function parseClaudeStream(text) {
+  const events = text
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch (error) {
+        throw new Error(`Invalid Claude stream JSON: ${error.message}`);
+      }
+    });
+  const results = events.filter((event) => event?.type === 'result');
+  if (results.length !== 1
+    || results[0].subtype !== 'success'
+    || typeof results[0].result !== 'string'
+    || results[0].result.trim().length === 0) {
+    throw new Error('Claude stream must contain exactly one successful Claude result');
+  }
+  return results[0].result;
+}
+
+export async function launchClaude(options, { model, ...dependencies } = {}) {
   if (model !== undefined && (typeof model !== 'string' || model.trim().length === 0)) {
     throw new TypeError('Claude model must be a non-empty string');
   }
-  return launchReviewerChild(options, {
+  const output = await launchReviewerChild(options, {
     ...dependencies,
     provider: 'Claude',
     command: 'claude',
@@ -326,6 +357,7 @@ export function launchClaude(options, { model, ...dependencies } = {}) {
       : [...CLAUDE_REVIEW_ARGS, '--model', model],
     environmentKeys: CLAUDE_ENV_KEYS,
   });
+  return parseClaudeStream(output);
 }
 
 export function launchCodex(options, { model, ...dependencies } = {}) {
@@ -348,9 +380,9 @@ export function launchCodex(options, { model, ...dependencies } = {}) {
 function usage() {
   return [
     'Usage:',
-    '  reviewer-runner.mjs run-claude --prompt-file FILE --protocol brb-review --angle ANGLE --timeout-ms NUMBER --output FILE',
-    '  reviewer-runner.mjs run-claude --prompt-file FILE --protocol brb-reproduction --expected-ids-file IDS.json --timeout-ms NUMBER --output FILE',
-    '  reviewer-runner.mjs run-claude --prompt-file FILE --protocol brb-verification --expected-ids-file IDS.json --timeout-ms NUMBER --output FILE',
+    '  reviewer-runner.mjs run-claude --model MODEL --prompt-file FILE --protocol brb-review --angle ANGLE --timeout-ms NUMBER --output FILE',
+    '  reviewer-runner.mjs run-claude --model MODEL --prompt-file FILE --protocol brb-reproduction --expected-ids-file IDS.json --timeout-ms NUMBER --output FILE',
+    '  reviewer-runner.mjs run-claude --model MODEL --prompt-file FILE --protocol brb-verification --expected-ids-file IDS.json --timeout-ms NUMBER --output FILE',
     '  reviewer-runner.mjs run-codex --model MODEL --prompt-file FILE --protocol brb-review --angle ANGLE --timeout-ms NUMBER --output FILE',
     '  reviewer-runner.mjs run-codex --model MODEL --prompt-file FILE --protocol brb-reproduction --expected-ids-file IDS.json --timeout-ms NUMBER --output FILE',
     '  reviewer-runner.mjs run-codex --model MODEL --prompt-file FILE --protocol brb-verification --expected-ids-file IDS.json --timeout-ms NUMBER --output FILE',
@@ -436,12 +468,7 @@ export async function main(args, dependencies = {}) {
   if (command !== 'run-claude' && command !== 'run-codex') throw new Error(usage());
 
   const options = readOptions(rest);
-  let model;
-  if (command === 'run-codex') {
-    model = requireOption(options, 'model');
-  } else if (options.model !== undefined) {
-    throw new TypeError('--model is supported only for run-codex');
-  }
+  const model = requireOption(options, 'model');
   const promptFile = requireOption(options, 'prompt-file');
   const protocol = requireOption(options, 'protocol');
   const angle = options.angle;
@@ -452,7 +479,7 @@ export async function main(args, dependencies = {}) {
   const writeFile = dependencies.writeFile ?? writeFileDefault;
   const launch = dependencies.launch ?? (command === 'run-codex'
     ? (launchOptions) => launchCodex(launchOptions, { model })
-    : launchClaude);
+    : (launchOptions) => launchClaude(launchOptions, { model }));
   let expectedIds;
   if (protocol === 'brb-reproduction') {
     const path = requireOption(options, 'expected-ids-file');

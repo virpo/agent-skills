@@ -58,6 +58,10 @@ function fakeChild({ stdout = '', stderr = '', code = 0 } = {}) {
   return child;
 }
 
+function claudeStream(result = COMPLETE_REVIEW) {
+  return `${JSON.stringify({ type: 'result', subtype: 'success', result })}\n`;
+}
+
 function controlledChild(events, label) {
   const child = new EventEmitter();
   child.stdin = new PassThrough();
@@ -108,7 +112,7 @@ test('runReviewer retries once in a different neutral directory', async () => {
   assert.equal(calls.length, 2);
   assert.equal(new Set(calls.map(({ cwd }) => cwd)).size, 2);
   for (const call of calls) {
-    assert.deepEqual(Object.keys(call).sort(), ['cwd', 'input', 'signal']);
+    assert.deepEqual(Object.keys(call).sort(), ['cwd', 'input', 'onActivity', 'signal']);
     assert.ok(call.cwd.startsWith(REVIEW_PREFIX));
     assert.notEqual(call.cwd, process.cwd());
     assert.equal(call.input, 'bounded packet with /private/target/path');
@@ -261,7 +265,7 @@ test('timeout waits for TERM, KILL, and child close before cleanup and retry', a
         events.push(`spawn:${attempts}`);
         return attempts === 1
           ? firstChild
-          : fakeChild({ stdout: COMPLETE_REVIEW });
+          : fakeChild({ stdout: claudeStream() });
       },
     }),
     validate: (output) => parseProtocolBlock(output, 'brb-review'),
@@ -634,7 +638,7 @@ test('launchClaude uses fixed arguments, minimal environment, and stdin prompt b
   let resolveInput;
   const inputEnded = new Promise((resolve) => { resolveInput = resolve; });
   const spawnImpl = (command, args, options) => {
-    const child = fakeChild({ stdout: 'normalized output', stderr: 'diagnostic' });
+    const child = fakeChild({ stdout: claudeStream('normalized output'), stderr: 'diagnostic' });
     child.stdin.on('data', (chunk) => { stdin += chunk.toString(); });
     child.stdin.on('end', resolveInput);
     calls.push({ command, args, options });
@@ -643,14 +647,19 @@ test('launchClaude uses fixed arguments, minimal environment, and stdin prompt b
 
   const output = await launchClaude(
     { cwd: '/neutral/reviewer', input: 'prompt bytes ; $(never)', signal: new AbortController().signal },
-    { spawnImpl },
+    { model: 'opus', spawnImpl },
   );
   await inputEnded;
 
   assert.equal(output, 'normalized output');
   assert.equal(stdin, 'prompt bytes ; $(never)');
   assert.deepEqual(calls[0].command, 'claude');
-  assert.deepEqual(calls[0].args, CLAUDE_REVIEW_ARGS);
+  assert.deepEqual(CLAUDE_REVIEW_ARGS, [
+    '--safe-mode', '--tools', '', '--disable-slash-commands',
+    '--no-session-persistence', '--permission-mode', 'plan', '--print',
+    '--output-format', 'stream-json', '--include-partial-messages',
+  ]);
+  assert.deepEqual(calls[0].args, [...CLAUDE_REVIEW_ARGS, '--model', 'opus']);
   assert.equal(calls[0].args.includes('prompt bytes ; $(never)'), false);
   assert.equal(calls[0].options.cwd, '/neutral/reviewer');
   assert.equal(calls[0].options.shell, false);
@@ -665,19 +674,75 @@ test('launchClaude uses fixed arguments, minimal environment, and stdin prompt b
   );
 });
 
-test('launchClaude appends an explicit configured model without changing isolation flags', async () => {
+test('launchClaude streams activity and returns the final result text', async () => {
+  const activity = [];
+  const stream = [
+    JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta' } }),
+    JSON.stringify({ type: 'result', subtype: 'success', result: COMPLETE_REVIEW }),
+    '',
+  ].join('\n');
   const calls = [];
-  await launchClaude(
-    { cwd: '/neutral/reviewer', input: 'packet', signal: new AbortController().signal },
+  const output = await launchClaude(
     {
-      model: 'sonnet',
+      cwd: '/neutral/reviewer',
+      input: 'packet',
+      signal: new AbortController().signal,
+      onActivity: () => activity.push('active'),
+    },
+    {
+      model: 'opus',
       spawnImpl: (command, args, options) => {
         calls.push({ command, args, options });
-        return fakeChild({ stdout: 'normalized output' });
+        return fakeChild({ stdout: stream, stderr: 'provider progress' });
       },
     },
   );
-  assert.deepEqual(calls[0].args, [...CLAUDE_REVIEW_ARGS, '--model', 'sonnet']);
+
+  assert.equal(output, COMPLETE_REVIEW);
+  assert.deepEqual(calls[0].args, [...CLAUDE_REVIEW_ARGS, '--model', 'opus']);
+  assert.ok(activity.length >= 2);
+});
+
+test('launchClaude rejects a stream without one successful result', async () => {
+  await assert.rejects(
+    launchClaude(
+      {
+        cwd: '/neutral/reviewer',
+        input: 'packet',
+        signal: new AbortController().signal,
+      },
+      {
+        model: 'opus',
+        spawnImpl: () => fakeChild({
+          stdout: `${JSON.stringify({ type: 'stream_event', event: {} })}\n`,
+        }),
+      },
+    ),
+    /successful Claude result/i,
+  );
+});
+
+test('launchClaude validates an activity callback before spawning', async () => {
+  let spawns = 0;
+  await assert.rejects(
+    launchClaude(
+      {
+        cwd: '/neutral/reviewer',
+        input: 'packet',
+        signal: new AbortController().signal,
+        onActivity: 'invalid',
+      },
+      {
+        model: 'opus',
+        spawnImpl: () => {
+          spawns += 1;
+          return fakeChild({ stdout: claudeStream() });
+        },
+      },
+    ),
+    /onActivity must be a function/,
+  );
+  assert.equal(spawns, 0);
 });
 
 test('launchCodex uses fixed isolated arguments, minimal environment, and stdin prompt bytes', async () => {
@@ -901,6 +966,7 @@ test('run-claude CLI retries once and writes only normalized validated JSON', as
   await main(
     [
       'run-claude',
+      '--model', 'opus',
       '--prompt-file', './packet.md',
       '--protocol', 'brb-review',
       '--angle', FEATURE_ANGLE,
@@ -963,6 +1029,25 @@ test('run-codex CLI requires a model and writes only normalized validated JSON',
   ]]);
 });
 
+test('run-claude CLI requires an explicit model', async () => {
+  let launches = 0;
+  await assert.rejects(
+    main([
+      'run-claude',
+      '--prompt-file', './packet.md',
+      '--protocol', 'brb-review',
+      '--angle', FEATURE_ANGLE,
+      '--timeout-ms', '25',
+      '--output', './review.json',
+    ], {
+      readFile: async () => 'bounded packet',
+      launch: async () => { launches += 1; return COMPLETE_REVIEW; },
+    }),
+    /--model is required/,
+  );
+  assert.equal(launches, 0);
+});
+
 test('run-claude CLI requires an assigned angle for first-pass review validation', async () => {
   let launches = 0;
 
@@ -970,6 +1055,7 @@ test('run-claude CLI requires an assigned angle for first-pass review validation
     main(
       [
         'run-claude',
+        '--model', 'opus',
         '--prompt-file', './packet.md',
         '--protocol', 'brb-review',
         '--timeout-ms', '25',
@@ -995,6 +1081,7 @@ test('run-claude reproduction binds output to a validated expected-IDs file', as
   await main(
     [
       'run-claude',
+      '--model', 'opus',
       '--prompt-file', './reproduction-prompt.md',
       '--protocol', 'brb-reproduction',
       '--expected-ids-file', './expected-ids.json',
@@ -1045,6 +1132,7 @@ test('run-claude reproduction validates expected IDs before launching', async ()
       main(
         [
           'run-claude',
+          '--model', 'opus',
           '--prompt-file', './prompt.md',
           '--protocol', 'brb-reproduction',
           ...args,
@@ -1076,6 +1164,7 @@ test('run-claude verification binds output to the complete expected BRS ID file'
   await main(
     [
       'run-claude',
+      '--model', 'opus',
       '--prompt-file', './verification-prompt.md',
       '--protocol', 'brb-verification',
       '--expected-ids-file', './expected-ids.json',
@@ -1130,6 +1219,7 @@ test('run-claude verification requires a valid expected BRS ID file but allows e
       main(
         [
           'run-claude',
+          '--model', 'opus',
           '--prompt-file', './prompt.md',
           '--protocol', 'brb-verification',
           ...args,
@@ -1153,6 +1243,7 @@ test('run-claude verification requires a valid expected BRS ID file but allows e
   let launches = 0;
   await main([
     'run-claude',
+    '--model', 'opus',
     '--prompt-file', './prompt.md',
     '--protocol', 'brb-verification',
     '--expected-ids-file', './ids.json',
