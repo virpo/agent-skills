@@ -442,7 +442,7 @@ test('coordinator CLI reports a no-work tick without invoking models or writes',
     '--reviewer', 'reviewer',
     '--repository', '/absolute/repository',
     '--state-dir', '/absolute/state',
-    '--claude-model', 'sonnet',
+    '--claude-model', 'opus',
     '--codex-model', 'gpt-5.6-sol',
     '--quiet-until-complete',
   ];
@@ -461,4 +461,65 @@ test('coordinator CLI reports a no-work tick without invoking models or writes',
   assert.deepEqual(result, []);
   assert.equal(calls.length, 1);
   assert.deepEqual(JSON.parse(output.join('')), { status: 'no-work' });
+});
+
+test('coordinator CLI can target one explicit draft PR at its exact head', async () => {
+  const { options: adapters } = harness({ dryRun: true });
+  const calls = [];
+  const output = [];
+  const args = [
+    'run',
+    '--repo', 'sli-do/slido-frontend',
+    '--pr', '17912',
+    '--repository', '/absolute/repository',
+    '--state-dir', '/absolute/state',
+    '--claude-model', 'opus',
+    '--codex-model', 'gpt-5.6-sol',
+    '--quiet-until-complete',
+    '--dry-run',
+  ];
+  const result = await main(args, {
+    execute: async (command, commandArgs) => {
+      calls.push({ command, args: commandArgs });
+      return {
+        stdout: JSON.stringify({ number: 17912, headRefOid: HEAD, isDraft: true }),
+        stderr: '',
+      };
+    },
+    state: adapters.state,
+    marker: adapters.marker,
+    github: adapters.github,
+    workspace: adapters.workspace,
+    reviewers: adapters.reviewers,
+    write: (value) => output.push(value),
+  });
+
+  assert.deepEqual(result, [{ status: 'eligible', trigger: {
+    repo: 'sli-do/slido-frontend',
+    number: 17912,
+    headSha: HEAD,
+    triggerId: `head:${HEAD}`,
+  } }]);
+  assert.deepEqual(calls, [{
+    command: 'gh',
+    args: ['pr', 'view', '17912', '--repo', 'sli-do/slido-frontend', '--json', 'number,headRefOid,isDraft'],
+  }]);
+  assert.equal(output.some((value) => value.includes('no-work')), false);
+});
+
+test('coordinator CLI refuses a non-Opus Claude model before discovery', async () => {
+  let calls = 0;
+  await assert.rejects(main([
+    'run',
+    '--repo', 'acme/widget',
+    '--author', 'mrshu',
+    '--reviewer', 'reviewer',
+    '--repository', '/absolute/repository',
+    '--state-dir', '/absolute/state',
+    '--claude-model', 'sonnet',
+    '--codex-model', 'gpt-5.6-sol',
+  ], {
+    execute: async () => { calls += 1; return { stdout: '[]', stderr: '' }; },
+  }), /claude-model must be opus/i);
+  assert.equal(calls, 0);
 });

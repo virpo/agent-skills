@@ -28,6 +28,9 @@ clusters with relevant callers, contracts, configuration, and tests. Generated,
 vendored, lockfile, fixture, and mechanical churn may be grouped but never
 omitted. Assign all three canonical angles exactly once. Assign exactly one
 highest-risk angle to provider claude and the other two to provider codex.
+Use sequential cluster IDs `cluster-1`, `cluster-2`, and so on. File disposition
+is exactly `material`, `mechanical`, or `low-risk`; cluster risk is exactly
+`low`, `medium`, or `high`. Every material file names its cluster ID.
 
 Return only one JSON object in one fenced brb-plan block. A complete result uses
 exactly: status, headSha, triggerId, intent, boundaries, clusters,

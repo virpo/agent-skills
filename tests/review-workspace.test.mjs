@@ -82,6 +82,40 @@ test('withReviewWorkspace materializes exact-head artifacts and nested agent rul
   }
 });
 
+test('withReviewWorkspace fetches an exact head missing from the local object store', async () => {
+  const fixture = await fixtureRepository();
+  const clone = join(fixture.root, 'clone');
+  try {
+    await execFileAsync('git', ['clone', fixture.repository, clone]);
+    await writeFile(join(fixture.repository, 'src', 'jobs.ts'), 'export const jobs = 2;\n');
+    await execFileAsync('git', ['-C', fixture.repository, 'add', 'src/jobs.ts']);
+    await execFileAsync('git', ['-C', fixture.repository, 'commit', '-m', 'second fixture']);
+    const { stdout } = await execFileAsync('git', [
+      '-C', fixture.repository, 'rev-parse', 'HEAD',
+    ]);
+    const missingHead = stdout.trim();
+    await assert.rejects(execFileAsync('git', [
+      '-C', clone, 'cat-file', '-e', `${missingHead}^{commit}`,
+    ]));
+
+    const result = await withReviewWorkspace({
+      repository: clone,
+      context: context(missingHead),
+      inspect: async (workspace) => {
+        const { stdout: inspectedHead } = await execFileAsync('git', [
+          '-C', workspace.checkout, 'rev-parse', 'HEAD',
+        ]);
+        assert.equal(inspectedHead.trim(), missingHead);
+        return 'fetched';
+      },
+    });
+
+    assert.equal(result, 'fetched');
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('withReviewWorkspace rejects a dirty checkout and removes it', async () => {
   const fixture = await fixtureRepository();
   let workspaceRoot;

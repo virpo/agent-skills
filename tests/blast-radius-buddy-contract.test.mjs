@@ -74,6 +74,7 @@ test('documents the native high-signal PR review contract', async () => {
   assert.match(angles, /synthesi[sz]ed.*multiple.*unique.*approved.*angle/is);
   assert.match(prompts, /Codex.*retry.*same stage deadline/is);
   assert.match(prompts, /Opus.*once.*Codex replacement.*never launch a second Opus/is);
+  assert.match(prompts, /cluster-1.*cluster-2.*material.*mechanical.*low-risk.*risk.*low.*medium.*high/is);
   assert.match(
     validation,
     /confirmed.*actionable.*narrowed.*actionable.*downgraded.*actionable.*drop.*unclear.*deferred.*refuted.*drop/is,

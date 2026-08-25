@@ -131,6 +131,18 @@ function preserveFor(error) {
     || error?.name === 'UnterminatedDiagnosticChildError';
 }
 
+async function ensureExactHead(repository, headSha, execute) {
+  try {
+    await execute('git', ['-C', repository, 'cat-file', '-e', `${headSha}^{commit}`]);
+    return;
+  } catch {
+    await execute('git', [
+      '-C', repository, 'fetch', '--no-tags', 'origin', headSha,
+    ]);
+    await execute('git', ['-C', repository, 'cat-file', '-e', `${headSha}^{commit}`]);
+  }
+}
+
 export async function withReviewWorkspace({
   repository,
   context,
@@ -144,6 +156,7 @@ export async function withReviewWorkspace({
   let added = false;
   let preserve = false;
   try {
+    await ensureExactHead(repository, context.headSha, execute);
     await execute('git', [
       '-C', repository, 'worktree', 'add', '--detach', checkout, context.headSha,
     ]);
