@@ -175,6 +175,7 @@ export async function runTrigger(options) {
     throw new TypeError('heartbeatIntervalMs must be a positive safe integer');
   }
   const { state, marker, github, reviewers, workspace, logger } = options;
+  const quietUntilComplete = options.quietUntilComplete === true;
   const lease = await state.acquire(trigger);
   if (!lease?.acquired) {
     log(logger, {
@@ -228,7 +229,7 @@ export async function runTrigger(options) {
     const context = await github.capture(trigger);
     const captured = validateContext(context, trigger);
     if (captured.stale) {
-      if (!options.dryRun) {
+      if (!options.dryRun && !quietUntilComplete) {
         await marker.stale({ trigger, context, actualHeadSha: captured.actualHeadSha });
       }
       return { status: 'stale', actualHeadSha: captured.actualHeadSha };
@@ -238,8 +239,10 @@ export async function runTrigger(options) {
       return { status: 'eligible', trigger };
     }
 
-    await marker.working({ trigger, context });
-    markerStarted = true;
+    if (!quietUntilComplete) {
+      await marker.working({ trigger, context });
+      markerStarted = true;
+    }
     if (controller.signal.aborted) throw controller.signal.reason;
     const pipeline = await workspace.create({
       context,
@@ -347,7 +350,9 @@ export async function runTrigger(options) {
 
     const current = await github.recheck({ trigger, context, synthesis });
     if (current?.headSha !== trigger.headSha) {
-      await marker.stale({ trigger, context, actualHeadSha: current?.headSha });
+      if (!quietUntilComplete) {
+        await marker.stale({ trigger, context, actualHeadSha: current?.headSha });
+      }
       return { status: 'stale', actualHeadSha: current?.headSha };
     }
     if (current.requiredChecksPass !== true) {
@@ -812,21 +817,21 @@ function createGithubAdapter({ execute, repository }) {
 function usage() {
   return [
     'Usage:',
-    '  review-coordinator.mjs run --repo OWNER/REPO --author LOGIN --reviewer LOGIN --repository ABSOLUTE_PATH --state-dir ABSOLUTE_PATH --claude-model MODEL --codex-model MODEL [--dry-run]',
+    '  review-coordinator.mjs run --repo OWNER/REPO --author LOGIN --reviewer LOGIN --repository ABSOLUTE_PATH --state-dir ABSOLUTE_PATH --claude-model MODEL --codex-model MODEL [--dry-run] [--quiet-until-complete]',
   ].join('\n');
 }
 
 function readOptions(args) {
   const allowed = new Set([
     'repo', 'author', 'reviewer', 'repository', 'state-dir',
-    'claude-model', 'codex-model', 'dry-run',
+    'claude-model', 'codex-model', 'dry-run', 'quiet-until-complete',
   ]);
   const options = {};
   for (let index = 0; index < args.length; index += 1) {
     const flag = args[index];
     const name = flag?.startsWith('--') ? flag.slice(2) : undefined;
     if (!name || !allowed.has(name) || options[name] !== undefined) throw new Error(usage());
-    if (name === 'dry-run') {
+    if (name === 'dry-run' || name === 'quiet-until-complete') {
       options[name] = true;
       continue;
     }
@@ -872,6 +877,7 @@ export async function main(args, dependencies = {}) {
     claudeModel,
     codexModel,
     dryRun: options['dry-run'] === true,
+    quietUntilComplete: options['quiet-until-complete'] === true,
     logger,
   };
   const results = await runQueue({

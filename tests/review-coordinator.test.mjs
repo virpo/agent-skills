@@ -381,6 +381,37 @@ test('completion binds state, marker, and submission to the exact trigger withou
   );
 });
 
+test('quiet-until-complete makes no GitHub write when any stage or gate fails', async () => {
+  const failures = [
+    (options) => { options.reviewers.assess = async () => { throw new Error('assessment failed'); }; },
+    (options) => { options.reviewers.reviewCodex = async () => { throw new Error('angle failed'); }; },
+    (options) => { options.reviewers.synthesize = async () => { throw new Error('synthesis failed'); }; },
+    (options) => { options.github.recheck = async () => ({ headSha: 'f'.repeat(40), requiredChecksPass: true }); },
+    (options) => { options.github.recheck = async () => ({ headSha: HEAD, requiredChecksPass: false, failedRequiredChecks: ['test'] }); },
+  ];
+  for (const arrange of failures) {
+    const { events, options } = harness({ quietUntilComplete: true });
+    arrange(options);
+    options.github.submit = async () => assert.fail('quiet failure must not submit');
+    await runTrigger(options);
+    assert.equal(events.some((event) => String(event).startsWith('marker:')), false);
+    assert.equal(events.some((event) => String(event).startsWith('github:submit:')), false);
+  }
+});
+
+test('quiet-until-complete publishes the native review before its only final marker', async () => {
+  const { events, options } = harness({ quietUntilComplete: true });
+  const result = await runTrigger(options);
+
+  assert.equal(result.status, 'complete');
+  const writes = events.filter((event) => typeof event === 'string'
+    && (event.startsWith('marker:') || event.startsWith('github:')));
+  assert.deepEqual(writes, [
+    `github:submit:${TRIGGER.triggerId}`,
+    `marker:complete:${TRIGGER.triggerId}`,
+  ]);
+});
+
 test('runQueue processes pull requests sequentially', async () => {
   const events = [];
   const triggers = [
@@ -413,6 +444,7 @@ test('coordinator CLI reports a no-work tick without invoking models or writes',
     '--state-dir', '/absolute/state',
     '--claude-model', 'sonnet',
     '--codex-model', 'gpt-5.6-sol',
+    '--quiet-until-complete',
   ];
   const result = await main(args, {
     execute: async (command, commandArgs) => {

@@ -25,26 +25,28 @@ test('documents the native high-signal PR review contract', async () => {
   assert.match(skill, /exact head SHA/i);
   assert.match(skill, /critical.*high.*meaningful.*medium/is);
   assert.match(skill, /exactly three/i);
-  assert.match(skill, /one fresh-eyes/i);
+  assert.match(skill, /Codex.*scope assessment/is);
   assert.match(skill, /APPROVE/);
   assert.match(skill, /never.*REQUEST_CHANGES/is);
   assert.match(skill, /explicitly installed automatic deployment.*validated trigger/is);
   assert.match(skill, /github-watch\.mjs.*review-coordinator\.mjs/is);
-  assert.match(skill, /three.*Claude.*one.*Codex.*synthesis-verification/is);
-  assert.match(skill, /exactly three.*Claude Opus.*one.*Codex/is);
-  assert.match(skill, /complete.*bounded packet.*each.*Opus/is);
-  assert.match(skill, /25.*minute.*Opus.*15.*minute.*Codex/is);
-  assert.match(skill, /five.*minute.*inactivity.*one fresh retry/is);
-  assert.match(skill, /90.*minute.*lease.*one.*minute.*heartbeat/is);
-  assert.match(skill, /never.*fallback.*Sonnet.*Haiku/is);
+  assert.match(skill, /two.*Codex.*one.*Claude Opus/is);
+  assert.match(skill, /never.*more than one.*Opus/is);
+  assert.match(skill, /Opus.*failure.*Codex replacement/is);
+  assert.match(skill, /exact detached checkout.*read-only/is);
+  assert.match(skill, /10.*minute.*assessment.*angle.*synthesis/is);
+  assert.match(skill, /five.*minute.*inactivity/is);
+  assert.match(skill, /45.*minute.*lease.*one.*minute.*heartbeat/is);
+  assert.match(skill, /never.*Sonnet.*Haiku/is);
+  assert.match(skill, /quiet-until-complete.*no GitHub write.*complete/is);
   assert.match(skill, /new head.*same-head.*re-review request/is);
   assert.match(skill, /dead.*expired.*lease.*reclaim/is);
   assert.match(skill, /5.*15.*30.*60.*minute/is);
   assert.match(skill, /restart.*sleep|sleep.*restart/is);
-  assert.match(skill, /cross-run duplicate suppression.*host semantic judgment.*complete prior-feedback ledger/is);
+  assert.match(skill, /cross-run duplicate suppression.*host semantic judgment.*complete\s+prior-feedback ledger/is);
   assert.match(
     skill,
-    /submit.*report.*diff.*verification.*gate.*recheck.*head.*write boundary/is,
+    /report.*diff.*verification.*gate.*submit.*recheck.*head.*write boundary/is,
   );
   assert.match(skill, /Do not add tests, edit production code, apply fixes, commit, or push/i);
   assert.match(skill, /safe to ignore indefinitely/i);
@@ -70,10 +72,8 @@ test('documents the native high-signal PR review contract', async () => {
     /security-and-abuse.*system-blast-radius.*feature-truth-and-adjacent-regressions/is,
   );
   assert.match(angles, /synthesi[sz]ed.*multiple.*unique.*approved.*angle/is);
-  assert.match(
-    prompts,
-    /retry.*only.*timeout.*malformed.*protocol.*validation.*launch.*authentication.*permission.*model.*not retried/is,
-  );
+  assert.match(prompts, /Codex.*retry.*same stage deadline/is);
+  assert.match(prompts, /Opus.*once.*Codex replacement.*never launch a second Opus/is);
   assert.match(
     validation,
     /confirmed.*actionable.*narrowed.*actionable.*downgraded.*actionable.*drop.*unclear.*deferred.*refuted.*drop/is,
@@ -141,10 +141,7 @@ test('documents the native high-signal PR review contract', async () => {
     scenario,
     /Automatic recovery control[\s\S]*long-active[\s\S]*heartbeat[\s\S]*silent[\s\S]*five-minute[\s\S]*retry/is,
   );
-  assert.match(
-    prompts,
-    /run-claude[\s\S]*--model opus[\s\S]*--inactivity-timeout-ms 300000[\s\S]*--timeout-ms 1500000/is,
-  );
+  assert.match(prompts, /separate 600,000\s+ms stage budgets.*300,000 ms inactivity watchdog/is);
   assert.doesNotMatch(skill, /repair loop/i);
   assert.ok(skill.trim().split(/\s+/).length < 700, 'SKILL.md must stay below 700 words');
   assert.doesNotMatch(readme, /accepted findings[^.\n]*fix/i);
