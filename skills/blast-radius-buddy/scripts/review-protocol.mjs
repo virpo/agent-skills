@@ -83,6 +83,18 @@ const SYNTHESIS_FIELDS = [
 ];
 const SYNTHESIS_COVERAGE_FIELDS = ['security', 'blastRadius', 'featureTruth'];
 const REVIEW_EVENTS = new Set(['COMMENT', 'APPROVE']);
+const PLAN_RISKS = new Set(['low', 'medium', 'high']);
+const PLAN_DISPOSITIONS = new Set(['material', 'mechanical', 'low-risk']);
+const PLAN_PROVIDERS = new Set(['codex', 'claude']);
+const PLAN_FIELDS = [
+  'status', 'headSha', 'triggerId', 'intent', 'boundaries', 'clusters',
+  'fileDispositions', 'assignments', 'missingContext',
+];
+const PLAN_CLUSTER_FIELDS = [
+  'id', 'risk', 'reason', 'changedFiles', 'relatedFiles', 'tests',
+];
+const PLAN_DISPOSITION_FIELDS = ['path', 'disposition', 'clusterId', 'reason'];
+const PLAN_ASSIGNMENT_FIELDS = ['angle', 'provider', 'reason'];
 const SEVERITY_RANK = new Map([
   ['critical', 0],
   ['high', 1],
@@ -359,6 +371,171 @@ export function parseProtocolBlock(text, label) {
   } catch (error) {
     throw new Error(`Invalid JSON in ${label} block: ${error.message}`);
   }
+}
+
+function uniqueRepositoryPaths(value, path, { allowEmpty = true } = {}) {
+  if (!Array.isArray(value) || (!allowEmpty && value.length === 0)) {
+    throw new TypeError(`${path} must be ${allowEmpty ? 'an' : 'a non-empty'} array`);
+  }
+  const paths = value.map((item, index) => repositoryPath(item, `${path}[${index}]`));
+  if (new Set(paths).size !== paths.length) {
+    throw new TypeError(`${path} must contain unique repository paths`);
+  }
+  return paths;
+}
+
+function nonEmptyStrings(value, path, { allowEmpty = false } = {}) {
+  if (!Array.isArray(value) || (!allowEmpty && value.length === 0)) {
+    throw new TypeError(`${path} must be ${allowEmpty ? 'an' : 'a non-empty'} array`);
+  }
+  return value.map((item, index) => nonEmptyString(item, `${path}[${index}]`));
+}
+
+function validatePlanIdentity(value, expected) {
+  assertObject(expected, 'expected plan identity');
+  const expectedHeadSha = fullHeadSha(expected.headSha, 'expected headSha');
+  const expectedTriggerId = nonEmptyString(expected.triggerId, 'expected triggerId');
+  const headSha = fullHeadSha(value.headSha, 'plan.headSha');
+  const triggerId = nonEmptyString(value.triggerId, 'plan.triggerId');
+  if (headSha !== expectedHeadSha) throw new TypeError('plan head does not match captured head');
+  if (triggerId !== expectedTriggerId) {
+    throw new TypeError('plan trigger does not match queued trigger');
+  }
+  return { headSha, triggerId };
+}
+
+export function validateReviewPlan(value, expected) {
+  assertObject(value, 'plan');
+  const { headSha, triggerId } = validatePlanIdentity(value, expected);
+  const changedFiles = uniqueRepositoryPaths(
+    expected.changedFiles,
+    'expected changed files',
+    { allowEmpty: false },
+  );
+  if (value.status === 'needs-context') {
+    assertExactFields(value, ['status', 'headSha', 'triggerId', 'missingContext'], 'plan');
+    return {
+      status: 'needs-context',
+      headSha,
+      triggerId,
+      missingContext: nonEmptyStrings(value.missingContext, 'plan.missingContext'),
+    };
+  }
+  if (value.status !== 'complete') throw new TypeError('plan.status is unsupported');
+  assertExactFields(value, PLAN_FIELDS, 'plan');
+  if (!Array.isArray(value.missingContext) || value.missingContext.length !== 0) {
+    throw new TypeError('plan.missingContext must be an empty array for a complete plan');
+  }
+  if (!Array.isArray(value.clusters)) throw new TypeError('plan.clusters must be an array');
+  const clusterIds = new Set();
+  const clusters = value.clusters.map((cluster, index) => {
+    const path = `plan.clusters[${index}]`;
+    assertExactFields(cluster, PLAN_CLUSTER_FIELDS, path);
+    const id = nonEmptyString(cluster.id, `${path}.id`);
+    if (!/^cluster-[1-9]\d*$/.test(id)) {
+      throw new TypeError(`${path}.id must use cluster-N format`);
+    }
+    if (clusterIds.has(id)) throw new TypeError('plan.clusters must contain unique IDs');
+    clusterIds.add(id);
+    return {
+      id,
+      risk: enumValue(cluster.risk, PLAN_RISKS, `${path}.risk`),
+      reason: nonEmptyString(cluster.reason, `${path}.reason`),
+      changedFiles: uniqueRepositoryPaths(
+        cluster.changedFiles,
+        `${path}.changedFiles`,
+        { allowEmpty: false },
+      ),
+      relatedFiles: uniqueRepositoryPaths(cluster.relatedFiles, `${path}.relatedFiles`),
+      tests: uniqueRepositoryPaths(cluster.tests, `${path}.tests`),
+    };
+  });
+  if (!Array.isArray(value.fileDispositions)) {
+    throw new TypeError('plan.fileDispositions must be an array');
+  }
+  const dispositionPaths = new Set();
+  const fileDispositions = value.fileDispositions.map((item, index) => {
+    const path = `plan.fileDispositions[${index}]`;
+    assertExactFields(item, PLAN_DISPOSITION_FIELDS, path);
+    const file = repositoryPath(item.path, `${path}.path`);
+    if (dispositionPaths.has(file)) {
+      throw new TypeError(`plan.fileDispositions has duplicate path ${file}`);
+    }
+    dispositionPaths.add(file);
+    const disposition = enumValue(
+      item.disposition,
+      PLAN_DISPOSITIONS,
+      `${path}.disposition`,
+    );
+    let clusterId = null;
+    if (disposition === 'material') {
+      clusterId = nonEmptyString(item.clusterId, `${path}.clusterId`);
+      if (!clusterIds.has(clusterId)) {
+        throw new TypeError(`${path}.clusterId references an unknown cluster`);
+      }
+    } else if (item.clusterId !== null) {
+      throw new TypeError(`${path}.clusterId must be null outside material disposition`);
+    }
+    return {
+      path: file,
+      disposition,
+      clusterId,
+      reason: nonEmptyString(item.reason, `${path}.reason`),
+    };
+  });
+  const expectedSet = new Set(changedFiles);
+  const missing = changedFiles.filter((path) => !dispositionPaths.has(path));
+  const unexpected = [...dispositionPaths].filter((path) => !expectedSet.has(path));
+  if (missing.length > 0 || unexpected.length > 0) {
+    throw new TypeError(
+      `plan file dispositions must match changed files; missing=${missing.join(',')}; unexpected=${unexpected.join(',')}`,
+    );
+  }
+  for (const cluster of clusters) {
+    for (const file of cluster.changedFiles) {
+      const disposition = fileDispositions.find((item) => item.path === file);
+      if (!disposition || disposition.disposition !== 'material'
+        || disposition.clusterId !== cluster.id) {
+        throw new TypeError(`plan cluster ${cluster.id} has an unbound changed file ${file}`);
+      }
+    }
+  }
+  for (const disposition of fileDispositions.filter((item) => item.disposition === 'material')) {
+    const cluster = clusters.find((item) => item.id === disposition.clusterId);
+    if (!cluster.changedFiles.includes(disposition.path)) {
+      throw new TypeError(`plan material file ${disposition.path} is absent from its cluster`);
+    }
+  }
+  if (!Array.isArray(value.assignments) || value.assignments.length !== ANGLES.size) {
+    throw new TypeError('plan.assignments must contain exactly three items');
+  }
+  const assignments = value.assignments.map((item, index) => {
+    const path = `plan.assignments[${index}]`;
+    assertExactFields(item, PLAN_ASSIGNMENT_FIELDS, path);
+    return {
+      angle: enumValue(item.angle, ANGLES, `${path}.angle`),
+      provider: enumValue(item.provider, PLAN_PROVIDERS, `${path}.provider`),
+      reason: nonEmptyString(item.reason, `${path}.reason`),
+    };
+  });
+  if (new Set(assignments.map(({ angle }) => angle)).size !== ANGLES.size) {
+    throw new TypeError('plan.assignments must cover every canonical angle exactly once');
+  }
+  if (assignments.filter(({ provider }) => provider === 'claude').length !== 1
+    || assignments.filter(({ provider }) => provider === 'codex').length !== 2) {
+    throw new TypeError('plan.assignments must contain exactly two Codex and one Claude');
+  }
+  return {
+    status: 'complete',
+    headSha,
+    triggerId,
+    intent: nonEmptyString(value.intent, 'plan.intent'),
+    boundaries: nonEmptyStrings(value.boundaries, 'plan.boundaries'),
+    clusters,
+    fileDispositions,
+    assignments,
+    missingContext: [],
+  };
 }
 
 export function validateReviewResult(value, expectedAngle) {

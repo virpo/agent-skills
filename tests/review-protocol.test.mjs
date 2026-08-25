@@ -15,6 +15,7 @@ import {
   parseProtocolBlock,
   selectReproductionCandidates,
   validateReproductionResult,
+  validateReviewPlan,
   validateReviewResult,
   validateSynthesisResult,
   validateVerificationResult,
@@ -106,6 +107,34 @@ const CLEAN_SYNTHESIS = {
   verification: CLEAN_VERIFICATION,
 };
 
+const REVIEW_PLAN = {
+  status: 'complete',
+  headSha: HEAD,
+  triggerId: TRIGGER,
+  intent: 'Add durable retry state for failed sync jobs.',
+  boundaries: ['local API scheduler', 'SQLite run state'],
+  clusters: [{
+    id: 'cluster-1',
+    risk: 'high',
+    reason: 'Retry state changes shared scheduling behavior.',
+    changedFiles: ['src/jobs.ts'],
+    relatedFiles: ['src/store.ts'],
+    tests: ['tests/jobs.test.ts'],
+  }],
+  fileDispositions: [{
+    path: 'src/jobs.ts',
+    disposition: 'material',
+    clusterId: 'cluster-1',
+    reason: 'Changes retry transitions.',
+  }],
+  assignments: [
+    { angle: SECURITY_ANGLE, provider: 'codex', reason: 'No new trust boundary.' },
+    { angle: SYSTEM_ANGLE, provider: 'claude', reason: 'Highest operational risk.' },
+    { angle: FEATURE_ANGLE, provider: 'codex', reason: 'Contract tracing.' },
+  ],
+  missingContext: [],
+};
+
 function clone(value) {
   return structuredClone(value);
 }
@@ -129,6 +158,64 @@ test('parseProtocolBlock accepts exactly one matching fenced JSON block', () => 
   for (const output of invalidOutputs) {
     assert.throws(() => parseProtocolBlock(output, 'brb-review'));
   }
+});
+
+test('validateReviewPlan accepts complete exact-head coverage and needs-context', () => {
+  assert.deepEqual(validateReviewPlan(REVIEW_PLAN, {
+    headSha: HEAD,
+    triggerId: TRIGGER,
+    changedFiles: ['src/jobs.ts'],
+  }), REVIEW_PLAN);
+  const needsContext = {
+    status: 'needs-context',
+    headSha: HEAD,
+    triggerId: TRIGGER,
+    missingContext: ['The generated route table is unavailable.'],
+  };
+  assert.deepEqual(validateReviewPlan(needsContext, {
+    headSha: HEAD,
+    triggerId: TRIGGER,
+    changedFiles: ['src/jobs.ts'],
+  }), needsContext);
+});
+
+test('validateReviewPlan requires a disposition for every changed file exactly once', () => {
+  for (const fileDispositions of [
+    [],
+    [REVIEW_PLAN.fileDispositions[0], REVIEW_PLAN.fileDispositions[0]],
+    [{ ...REVIEW_PLAN.fileDispositions[0], path: 'src/other.ts' }],
+  ]) {
+    assert.throws(() => validateReviewPlan({ ...REVIEW_PLAN, fileDispositions }, {
+      headSha: HEAD,
+      triggerId: TRIGGER,
+      changedFiles: ['src/jobs.ts'],
+    }), /changed files|duplicate|unexpected/i);
+  }
+});
+
+test('validateReviewPlan rejects unsafe paths, broken clusters, and invalid assignments', () => {
+  const invalidPlans = [
+    { ...REVIEW_PLAN, fileDispositions: [{ ...REVIEW_PLAN.fileDispositions[0], path: '../x' }] },
+    { ...REVIEW_PLAN, fileDispositions: [{ ...REVIEW_PLAN.fileDispositions[0], clusterId: 'missing' }] },
+    { ...REVIEW_PLAN, assignments: REVIEW_PLAN.assignments.slice(0, 2) },
+    { ...REVIEW_PLAN, assignments: REVIEW_PLAN.assignments.map((item) => ({ ...item, provider: 'claude' })) },
+    { ...REVIEW_PLAN, assignments: REVIEW_PLAN.assignments.map((item, index) => (
+      index === 2 ? { ...item, angle: SYSTEM_ANGLE } : item
+    )) },
+    { ...REVIEW_PLAN, extra: true },
+  ];
+  for (const plan of invalidPlans) {
+    assert.throws(() => validateReviewPlan(plan, {
+      headSha: HEAD,
+      triggerId: TRIGGER,
+      changedFiles: ['src/jobs.ts'],
+    }));
+  }
+  assert.throws(() => validateReviewPlan(REVIEW_PLAN, {
+    headSha: 'f'.repeat(40),
+    triggerId: TRIGGER,
+    changedFiles: ['src/jobs.ts'],
+  }), /head/i);
 });
 
 test('synthesis validation accepts a trigger-bound complete result', () => {
