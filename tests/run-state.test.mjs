@@ -41,14 +41,14 @@ test('lease acquisition is exclusive while its owner is alive', async () => with
   });
 
   assert.equal(first.acquired, true);
-  assert.equal(first.deadlineAt, 1_000 + 30 * MINUTE);
+  assert.equal(first.deadlineAt, 1_000 + 90 * MINUTE);
   assert.deepEqual(second, { acquired: false, reason: 'owned', ownerId: first.ownerId });
 }));
 
 test('a dead owner or elapsed whole-run deadline is reclaimable', async () => {
   for (const { alive, now } of [
     { alive: false, now: 2_000 },
-    { alive: true, now: 31 * MINUTE },
+    { alive: true, now: 91 * MINUTE },
   ]) {
     await withState(async (stateDir) => {
       const first = await acquireLease({

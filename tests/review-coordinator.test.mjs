@@ -8,6 +8,7 @@ import {
   runQueue,
   runTrigger,
 } from '../skills/blast-radius-buddy/scripts/review-coordinator.mjs';
+import * as coordinatorModule from '../skills/blast-radius-buddy/scripts/review-coordinator.mjs';
 
 const HEAD = '0123456789abcdef0123456789abcdef01234567';
 const TRIGGER = {
@@ -145,6 +146,67 @@ test('three Claude angles start in parallel before one Codex synthesis', async (
   assert.ok(events.indexOf('codex:synthesis') > events.indexOf('claude:feature-truth-and-adjacent-regressions'));
 });
 
+test('coordinator exports model-specific review and recovery timing', () => {
+  assert.equal(coordinatorModule.CLAUDE_TIMEOUT_MS, 25 * 60_000);
+  assert.equal(coordinatorModule.CODEX_TIMEOUT_MS, 15 * 60_000);
+  assert.equal(coordinatorModule.REVIEWER_INACTIVITY_TIMEOUT_MS, 5 * 60_000);
+  assert.equal(coordinatorModule.HEARTBEAT_INTERVAL_MS, 60_000);
+});
+
+test('runTrigger validates the heartbeat interval before acquiring a lease', async () => {
+  const { events, options } = harness({ heartbeatIntervalMs: 0 });
+  await assert.rejects(runTrigger(options), /heartbeatIntervalMs/);
+  assert.deepEqual(events, []);
+});
+
+test('long model stages heartbeat the fixed lease until completion', async () => {
+  const reviews = new Map(ANGLE_SLUGS.map((angle) => [angle, deferred()]));
+  const { events, options } = harness({ heartbeatIntervalMs: 5 });
+  options.reviewers.claude = ({ angle }) => reviews.get(angle).promise;
+
+  const resultPromise = runTrigger(options);
+  await delay(18);
+  const heartbeatsDuringReview = events.filter((event) => event === 'state:heartbeat').length;
+  for (const review of reviews.values()) {
+    review.resolve({ status: 'complete', findings: [], suggestions: [] });
+  }
+  const result = await resultPromise;
+  assert.equal(result.status, 'complete');
+  assert.ok(heartbeatsDuringReview >= 2);
+  const heartbeatCount = events.filter((event) => event === 'state:heartbeat').length;
+  await delay(12);
+  assert.equal(events.filter((event) => event === 'state:heartbeat').length, heartbeatCount);
+});
+
+test('a rejected heartbeat aborts every angle and schedules safe recovery', async () => {
+  const { events, options } = harness({ heartbeatIntervalMs: 5 });
+  let abortedAngles = 0;
+  options.state.acquire = async () => ({
+    acquired: true,
+    ownerId: 'owner-1',
+    deadlineAt: Date.now() + 100,
+  });
+  options.state.heartbeat = async () => {
+    events.push('state:heartbeat');
+    throw new Error('lease heartbeat failed');
+  };
+  options.reviewers.claude = ({ signal }) => new Promise((_, reject) => {
+    signal.addEventListener('abort', () => {
+      abortedAngles += 1;
+      reject(signal.reason);
+    }, { once: true });
+  });
+  options.github.submit = async () => assert.fail('native review must not be submitted');
+
+  const result = await runTrigger(options);
+  assert.equal(result.status, 'retry-scheduled');
+  assert.match(result.reason, /heartbeat failed/i);
+  assert.equal(abortedAngles, 3);
+  assert.ok(events.includes('state:failure:review'));
+  assert.ok(events.some((event) => String(event).startsWith('marker:retry:')));
+  assert.equal(events.at(-1), 'state:release');
+});
+
 test('a failed Claude angle aborts siblings, skips Codex, and remains retryable', async () => {
   const { events, options } = harness();
   options.reviewers = {
@@ -243,7 +305,10 @@ test('completion binds state, marker, and submission to the exact trigger withou
   assert.ok(events.includes(`github:submit:${TRIGGER.triggerId}`));
   assert.ok(events.includes(`marker:complete:${TRIGGER.triggerId}`));
   assert.ok(events.includes(`state:success:${TRIGGER.triggerId}`));
-  assert.doesNotMatch(serializedLogs, /bounded packet|SECRET_TOKEN/);
+  assert.doesNotMatch(
+    serializedLogs,
+    /bounded packet|SECRET_TOKEN|diff --git|brb-review|CLAUDE_SECRET|CODEX_SECRET/,
+  );
 });
 
 test('runQueue processes pull requests sequentially', async () => {

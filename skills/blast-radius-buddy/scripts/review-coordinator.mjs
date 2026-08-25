@@ -41,7 +41,10 @@ const execFileAsync = promisify(execFile);
 const SCRIPT_DIRECTORY = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const SKILL_DIRECTORY = resolve(SCRIPT_DIRECTORY, '..');
 const PACKET_LIMIT = 400_000;
-const MODEL_TIMEOUT_MS = 420_000;
+export const CLAUDE_TIMEOUT_MS = 25 * 60_000;
+export const CODEX_TIMEOUT_MS = 15 * 60_000;
+export const REVIEWER_INACTIVITY_TIMEOUT_MS = 5 * 60_000;
+export const HEARTBEAT_INTERVAL_MS = 60_000;
 
 const defaultExecute = (command, args) => execFileAsync(command, args, {
   encoding: 'utf8',
@@ -164,6 +167,10 @@ export async function runTrigger(options) {
   }
   const trigger = validateTrigger(options.trigger);
   validateDependencies(options);
+  const heartbeatIntervalMs = options.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS;
+  if (!Number.isSafeInteger(heartbeatIntervalMs) || heartbeatIntervalMs <= 0) {
+    throw new TypeError('heartbeatIntervalMs must be a positive safe integer');
+  }
   const { state, marker, github, reviewers, packetBuilder, logger } = options;
   const lease = await state.acquire(trigger);
   if (!lease?.acquired) {
@@ -189,6 +196,31 @@ export async function runTrigger(options) {
     () => controller.abort(new WholeRunDeadlineError()),
     Math.max(1, remainingMs),
   );
+  let heartbeatTimer;
+  let wakeHeartbeat;
+  let stopHeartbeat = false;
+  const waitForHeartbeat = () => new Promise((resolveWait) => {
+    const finishWait = () => {
+      clearTimeout(heartbeatTimer);
+      heartbeatTimer = undefined;
+      wakeHeartbeat = undefined;
+      resolveWait();
+    };
+    wakeHeartbeat = finishWait;
+    heartbeatTimer = setTimeout(finishWait, heartbeatIntervalMs);
+  });
+  const heartbeatLoop = (async () => {
+    while (!stopHeartbeat) {
+      await waitForHeartbeat();
+      if (stopHeartbeat) break;
+      try {
+        await state.heartbeat(lease);
+      } catch (error) {
+        controller.abort(error);
+        break;
+      }
+    }
+  })();
 
   try {
     const context = await github.capture(trigger);
@@ -211,6 +243,7 @@ export async function runTrigger(options) {
       throw new Error('Bounded review packet is empty');
     }
     log(logger, { event: 'stage-start', stage: 'claude-angles', pr: trigger.number });
+    if (controller.signal.aborted) throw controller.signal.reason;
     anglePromises = ANGLE_SLUGS.map((angle) => reviewers.claude({
       angle,
       context,
@@ -227,7 +260,6 @@ export async function runTrigger(options) {
       throw error;
     }
     if (controller.signal.aborted) throw controller.signal.reason;
-    await state.heartbeat(lease);
 
     log(logger, { event: 'stage-start', stage: 'codex-synthesis', pr: trigger.number });
     const synthesis = await reviewers.codex({
@@ -240,7 +272,6 @@ export async function runTrigger(options) {
     });
     if (controller.signal.aborted) throw controller.signal.reason;
     validateSynthesisIdentity(synthesis, trigger);
-    await state.heartbeat(lease);
 
     const current = await github.recheck({ trigger, context, synthesis });
     if (current?.headSha !== trigger.headSha) {
@@ -320,6 +351,9 @@ export async function runTrigger(options) {
       nextEligibleAt: failure.nextEligibleAt,
     };
   } finally {
+    stopHeartbeat = true;
+    wakeHeartbeat?.();
+    await heartbeatLoop;
     clearTimeout(deadlineTimer);
     await state.release(lease);
   }
@@ -585,19 +619,28 @@ function synthesisPrompt({ context, packet, angles, reportContract }) {
   ].join('\n\n');
 }
 
-async function createReviewerAdapter() {
+async function createReviewerAdapter({ logger } = {}) {
   const [angleReference, reportContract] = await Promise.all([
     readFile(join(SKILL_DIRECTORY, 'references', 'review-angles.md'), 'utf8'),
     readFile(join(SKILL_DIRECTORY, 'references', 'github-report.md'), 'utf8'),
   ]);
   return {
-    claude: ({ angle, packet, model, signal }) => runReviewer({
+    claude: ({ angle, context, packet, model, signal }) => runReviewer({
       prompt: firstPassPrompt({ angle, packet, reference: angleReference }),
       launch: (options) => launchClaude(options, { model }),
       validate: (output) => validateReviewResult(parseProtocolBlock(output, 'brb-review'), angle),
-      timeoutMs: MODEL_TIMEOUT_MS,
+      timeoutMs: CLAUDE_TIMEOUT_MS,
+      inactivityTimeoutMs: REVIEWER_INACTIVITY_TIMEOUT_MS,
       retries: 1,
       signal,
+      onAttemptEvent: (attemptEvent) => log(logger, {
+        event: 'reviewer-attempt',
+        triggerId: context.triggerId,
+        pr: context.number,
+        stage: angle,
+        model,
+        ...attemptEvent,
+      }),
     }),
     codex: ({ context, packet, angles, model, signal }) => runReviewer({
       prompt: synthesisPrompt({ context, packet, angles, reportContract }),
@@ -606,9 +649,18 @@ async function createReviewerAdapter() {
         parseProtocolBlock(output, 'brb-synthesis'),
         { headSha: context.headSha, triggerId: context.triggerId },
       ),
-      timeoutMs: MODEL_TIMEOUT_MS,
+      timeoutMs: CODEX_TIMEOUT_MS,
+      inactivityTimeoutMs: REVIEWER_INACTIVITY_TIMEOUT_MS,
       retries: 1,
       signal,
+      onAttemptEvent: (attemptEvent) => log(logger, {
+        event: 'reviewer-attempt',
+        triggerId: context.triggerId,
+        pr: context.number,
+        stage: 'codex-synthesis',
+        model,
+        ...attemptEvent,
+      }),
     }),
   };
 }
@@ -709,8 +761,9 @@ export async function main(args, dependencies = {}) {
   const codexModel = requiredOption(options, 'codex-model');
   const execute = dependencies.execute ?? defaultExecute;
   const write = dependencies.write ?? ((value) => process.stdout.write(value));
+  const logger = { log: (record) => write(`${JSON.stringify(record)}\n`) };
   const triggers = await findEligibleTriggers({ repo, author, reviewer, execute });
-  const reviewers = dependencies.reviewers ?? await createReviewerAdapter();
+  const reviewers = dependencies.reviewers ?? await createReviewerAdapter({ logger });
   const shared = {
     state: dependencies.state ?? createStateAdapter({ stateDir }),
     marker: dependencies.marker ?? createMarkerAdapter({ execute }),
@@ -720,7 +773,7 @@ export async function main(args, dependencies = {}) {
     claudeModel,
     codexModel,
     dryRun: options['dry-run'] === true,
-    logger: { log: (record) => write(`${JSON.stringify(record)}\n`) },
+    logger,
   };
   const results = await runQueue({
     triggers,
