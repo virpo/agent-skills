@@ -13,7 +13,7 @@ The control produced strong domain-specific review logic and test ideas, but did
 
 ## Automatic recovery control
 
-The no-skill control also treated one completed head as permanent. It did not recognize a same-head re-review request as new work, reclaim a stuck reviewer lease, retry failures with bounded backoff, or restart discovery after the computer restarted or resumed from sleep. The revised automatic contract derives the queue from GitHub every tick, runs three Claude angles before one Codex synthesis-verification, and leaves retry state visible in the single marker.
+The no-skill control also treated one completed head as permanent. It did not recognize a same-head re-review request as new work, reclaim a stuck reviewer lease, retry failures with bounded backoff, or restart discovery after the computer restarted or resumed from sleep. The revised automatic contract derives the queue from GitHub every tick, runs three Claude Opus angles before one Codex synthesis-verification, and leaves retry state visible in the single marker. A long-active reviewer keeps its fixed lease healthy with one-minute heartbeats. A silent reviewer hits the five-minute inactivity watchdog, gets one fresh retry, and remains eligible through bounded backoff if that retry fails.
 
 ## Revised no-skill baseline
 

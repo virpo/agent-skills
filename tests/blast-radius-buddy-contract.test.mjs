@@ -31,6 +31,12 @@ test('documents the native high-signal PR review contract', async () => {
   assert.match(skill, /explicitly installed automatic deployment.*validated trigger/is);
   assert.match(skill, /github-watch\.mjs.*review-coordinator\.mjs/is);
   assert.match(skill, /three.*Claude.*one.*Codex.*synthesis-verification/is);
+  assert.match(skill, /exactly three.*Claude Opus.*one.*Codex/is);
+  assert.match(skill, /complete.*bounded packet.*each.*Opus/is);
+  assert.match(skill, /25.*minute.*Opus.*15.*minute.*Codex/is);
+  assert.match(skill, /five.*minute.*inactivity.*one fresh retry/is);
+  assert.match(skill, /90.*minute.*lease.*one.*minute.*heartbeat/is);
+  assert.match(skill, /never.*fallback.*Sonnet.*Haiku/is);
   assert.match(skill, /new head.*same-head.*re-review request/is);
   assert.match(skill, /dead.*expired.*lease.*reclaim/is);
   assert.match(skill, /5.*15.*30.*60.*minute/is);
@@ -130,6 +136,14 @@ test('documents the native high-signal PR review contract', async () => {
   assert.match(
     scenario,
     /Automatic recovery control[\s\S]*same-head re-review[\s\S]*stuck[\s\S]*restart/is,
+  );
+  assert.match(
+    scenario,
+    /Automatic recovery control[\s\S]*long-active[\s\S]*heartbeat[\s\S]*silent[\s\S]*five-minute[\s\S]*retry/is,
+  );
+  assert.match(
+    prompts,
+    /run-claude[\s\S]*--model opus[\s\S]*--inactivity-timeout-ms 300000[\s\S]*--timeout-ms 1500000/is,
   );
   assert.doesNotMatch(skill, /repair loop/i);
   assert.ok(skill.trim().split(/\s+/).length < 700, 'SKILL.md must stay below 700 words');

@@ -2,7 +2,7 @@
 
 Run every call in a fresh context. Give first-pass reviewers only the bounded packet: no target-repository access, host-filesystem access, tools, connectors, prior angle output, suspected finding, or expected fix. Use `scripts/reviewer-runner.mjs` when its isolated reviewer matches the required model family; otherwise use an equivalently isolated, tool-less invocation.
 
-Give first-pass and fresh-eyes calls a hard timeout of 420,000 ms. Give reproduction 600,000 ms. Retry only after a timeout or malformed protocol or validation response, once, in another fresh context with the same timeout. Launch, authentication, permission, model execution or availability, output-limit, and child-lifecycle failures are not retried; stop immediately as incomplete.
+Give Claude Opus calls a 1,500,000 ms hard timeout and Codex synthesis-verification a 900,000 ms hard timeout. Both use a 300,000 ms inactivity timeout. Give reproduction diagnostics 600,000 ms. Retry only after a hard timeout, inactivity timeout, or malformed protocol or validation response, once, in another fresh context with the same limits. Launch, authentication, permission, model execution or availability, output-limit, and child-lifecycle failures are not retried; stop immediately as incomplete.
 
 ## First-pass recipe
 
@@ -12,10 +12,12 @@ Run a first-pass Claude reviewer with its exact assigned angle:
 
 ```bash
 node skills/blast-radius-buddy/scripts/reviewer-runner.mjs run-claude \
+  --model opus \
   --prompt-file PROMPT.md \
   --protocol brb-review \
   --angle security-and-abuse \
-  --timeout-ms 420000 \
+  --inactivity-timeout-ms 300000 \
+  --timeout-ms 1500000 \
   --output REVIEW.json
 ```
 
@@ -37,7 +39,7 @@ Do not edit, comment, approve, request changes, resolve, push, merge, or infer a
 
 ## Codex synthesis-verification recipe
 
-Start exactly one Codex stage after all three assigned Claude results validate. Run it through `launchCodex` and `runReviewer` from `scripts/reviewer-runner.mjs` with model `gpt-5.6-sol`, a 420,000 ms timeout, one fresh-context retry only for timeout or malformed output, and `validateSynthesisResult(parseProtocolBlock(output, "brb-synthesis"), { headSha, triggerId })` as the validation boundary.
+Start exactly one Codex stage after all three assigned Claude results validate. Run it through `launchCodex` and `runReviewer` from `scripts/reviewer-runner.mjs` with model `gpt-5.6-sol`, a 900,000 ms hard timeout, a 300,000 ms inactivity timeout, one fresh-context retry only for timeout or malformed output, and `validateSynthesisResult(parseProtocolBlock(output, "brb-synthesis"), { headSha, triggerId })` as the validation boundary.
 
 Build the prompt in this order: role, captured identity, untrusted-data boundary, bounded packet, prior-feedback ledger, the three labelled validated angle results, changed new-side line map, duties, exact envelope contract, and action limits.
 
@@ -108,10 +110,12 @@ Write the complete host-selected `BRS` ID array to `EXPECTED-SUGGESTION-IDS.json
 
 ```bash
 node skills/blast-radius-buddy/scripts/reviewer-runner.mjs run-claude \
+  --model opus \
   --prompt-file VERIFICATION-PROMPT.md \
   --protocol brb-verification \
   --expected-ids-file EXPECTED-SUGGESTION-IDS.json \
-  --timeout-ms 420000 \
+  --inactivity-timeout-ms 300000 \
+  --timeout-ms 1500000 \
   --output VERIFICATION.json
 ```
 
