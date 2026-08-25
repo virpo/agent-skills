@@ -832,6 +832,7 @@ test('launchClaude repository mode pins Opus medium with read-only tools only', 
     {
       model: 'opus',
       repositoryAccess: true,
+      jsonSchema: { type: 'object' },
       spawnImpl: (command, args, options) => {
         calls.push({ command, args, options });
         return fakeChild({ stdout: claudeStream() });
@@ -847,7 +848,9 @@ test('launchClaude repository mode pins Opus medium with read-only tools only', 
     '--effort', 'medium', '--prompt-suggestions', 'false',
   ]);
   assert.deepEqual(calls[0].args, [
-    ...CLAUDE_REPOSITORY_REVIEW_ARGS, '--model', 'opus',
+    ...CLAUDE_REPOSITORY_REVIEW_ARGS,
+    '--json-schema', '{"type":"object"}',
+    '--model', 'opus',
   ]);
   assert.equal(calls[0].args.some((value) => /Bash|Edit|Write|Web|GitHub/.test(value)), false);
   assert.equal(calls[0].options.cwd, '/exact/review-workspace');

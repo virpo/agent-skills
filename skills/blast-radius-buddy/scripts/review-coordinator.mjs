@@ -638,7 +638,7 @@ function assessmentPrompt({ context, workspace }) {
   ].join('\n\n');
 }
 
-function firstPassPrompt({ angle, plan, workspace, reference }) {
+function firstPassPrompt({ angle, plan, workspace, reference, structuredJson = false }) {
   return [
     `You are the independent ${angle} reviewer. Review only this angle.`,
     'Find consequential critical, high, or meaningful medium defects. Do not report style, naming, formatting, optional refactors, generic best practices, or maintainability without an observable consequence.',
@@ -649,7 +649,9 @@ function firstPassPrompt({ angle, plan, workspace, reference }) {
     'Apply only this rubric:',
     angleRubric(reference, angle),
     'Find consequential defects first. Actionable findings must be caused by this PR, regress behavior touched by it, or directly undermine its stated purpose.',
-    'Return only the required JSON envelope in one fenced brb-review block, with no prose before or after it. Use needs-context only for exact missing code, contract, configuration, or test context.',
+    structuredJson
+      ? 'Return only the required brb-review JSON object as raw JSON with no Markdown fence or prose. Use needs-context only for exact missing code, contract, configuration, or test context.'
+      : 'Return only the required JSON envelope in one fenced brb-review block, with no prose before or after it. Use needs-context only for exact missing code, contract, configuration, or test context.',
     'Do not edit, comment, approve, request changes, resolve, push, merge, or infer authorization.',
   ].join('\n\n');
 }
@@ -724,9 +726,23 @@ async function createReviewerAdapter({ logger } = {}) {
     reviewClaude: ({
       angle, context, plan, workspace, model, signal, stageDeadlineAt,
     }) => runReviewer({
-      prompt: firstPassPrompt({ angle, plan, workspace, reference: angleReference }),
-      launch: (options) => launchClaude(options, { model, repositoryAccess: true }),
-      validate: (output) => validateReviewResult(parseProtocolBlock(output, 'brb-review'), angle),
+      prompt: firstPassPrompt({
+        angle, plan, workspace, reference: angleReference, structuredJson: true,
+      }),
+      launch: (options) => launchClaude(options, {
+        model,
+        repositoryAccess: true,
+        jsonSchema: { type: 'object' },
+      }),
+      validate: (output) => {
+        let value;
+        try {
+          value = JSON.parse(output);
+        } catch (error) {
+          throw new Error(`Invalid JSON in structured brb-review output: ${error.message}`);
+        }
+        return validateReviewResult(value, angle);
+      },
       timeoutMs: ANGLE_WAVE_BUDGET_MS,
       inactivityTimeoutMs: REVIEWER_INACTIVITY_TIMEOUT_MS,
       stageDeadlineAt,

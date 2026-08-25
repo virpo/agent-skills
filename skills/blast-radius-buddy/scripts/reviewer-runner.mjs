@@ -443,7 +443,7 @@ function parseClaudeStream(text) {
 
 export async function launchClaude(
   options,
-  { model, repositoryAccess = false, ...dependencies } = {},
+  { model, repositoryAccess = false, jsonSchema, ...dependencies } = {},
 ) {
   if (model !== undefined && (typeof model !== 'string' || model.trim().length === 0)) {
     throw new TypeError('Claude model must be a non-empty string');
@@ -451,12 +451,17 @@ export async function launchClaude(
   if (typeof repositoryAccess !== 'boolean') {
     throw new TypeError('repositoryAccess must be a boolean');
   }
+  if (jsonSchema !== undefined
+    && (jsonSchema === null || typeof jsonSchema !== 'object' || Array.isArray(jsonSchema))) {
+    throw new TypeError('Claude JSON schema must be an object');
+  }
   const output = await launchReviewerChild(options, {
     ...dependencies,
     provider: 'Claude',
     command: 'claude',
     args: [
       ...(repositoryAccess ? CLAUDE_REPOSITORY_REVIEW_ARGS : CLAUDE_REVIEW_ARGS),
+      ...(jsonSchema === undefined ? [] : ['--json-schema', JSON.stringify(jsonSchema)]),
       ...(model === undefined ? [] : ['--model', model]),
     ],
     environmentKeys: CLAUDE_ENV_KEYS,

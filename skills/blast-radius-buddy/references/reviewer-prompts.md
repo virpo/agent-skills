@@ -58,6 +58,10 @@ workspace artifact paths, validated scope plan, single rubric, output contract,
 and action limits. Dispatch the two Codex assignments and one Opus assignment in
 parallel.
 
+The Opus assignment uses Claude JSON Schema structured output and returns the
+same envelope as raw JSON. Codex assignments return the fenced `brb-review`
+form shown below. Both paths pass the same strict host validator.
+
 ```text
 You are the independent <ANGLE> reviewer. Review only this angle.
 Find consequential critical, high, or meaningful medium defects. Do not report style, naming, formatting, optional refactors, generic best practices, or maintainability without an observable consequence.
