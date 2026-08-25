@@ -178,7 +178,83 @@ test('runReviewer uses a 420,000 ms default timeout', async () => {
     globalThis.setTimeout = originalSetTimeout;
   }
 
-  assert.deepEqual(delays, [420_000]);
+  assert.deepEqual(delays, [420_000, 300_000]);
+});
+
+test('activity resets the inactivity watchdog without extending the hard deadline', async () => {
+  let attempts = 0;
+  await assert.rejects(
+    runReviewer({
+      prompt: 'packet',
+      timeoutMs: 30,
+      inactivityTimeoutMs: 8,
+      retries: 0,
+      launch: ({ signal, onActivity }) => new Promise((_, reject) => {
+        attempts += 1;
+        const pulse = setInterval(onActivity, 3);
+        signal.addEventListener('abort', () => {
+          clearInterval(pulse);
+          reject(signal.reason);
+        }, { once: true });
+      }),
+      validate: () => assert.fail('timed-out output must not validate'),
+    }),
+    /timed out after 30 ms/i,
+  );
+  assert.equal(attempts, 1);
+});
+
+test('silence aborts one attempt and retries once in a fresh directory', async () => {
+  const directories = [];
+  const abortReasons = [];
+  const result = await runReviewer({
+    prompt: 'packet',
+    timeoutMs: 100,
+    inactivityTimeoutMs: 5,
+    retries: 1,
+    launch: ({ cwd, signal, onActivity }) => {
+      directories.push(cwd);
+      if (directories.length === 2) {
+        onActivity();
+        return Promise.resolve(COMPLETE_REVIEW);
+      }
+      return new Promise((_, reject) => signal.addEventListener('abort', () => {
+        abortReasons.push(signal.reason);
+        reject(signal.reason);
+      }, { once: true }));
+    },
+    validate: (output) => parseProtocolBlock(output, 'brb-review'),
+  });
+
+  assert.deepEqual(result, { status: 'complete', findings: [], suggestions: [] });
+  assert.equal(new Set(directories).size, 2);
+  assert.match(abortReasons[0]?.message ?? '', /no activity for 5 ms/i);
+});
+
+test('runReviewer emits content-free attempt lifecycle events', async () => {
+  const events = [];
+  let attempts = 0;
+  const result = await runReviewer({
+    prompt: 'SECRET_PACKET',
+    timeoutMs: 100,
+    inactivityTimeoutMs: 50,
+    retries: 1,
+    onAttemptEvent: (event) => events.push(event),
+    launch: async () => {
+      attempts += 1;
+      return attempts === 1 ? 'malformed' : COMPLETE_REVIEW;
+    },
+    validate: (output) => parseProtocolBlock(output, 'brb-review'),
+  });
+
+  assert.deepEqual(result, { status: 'complete', findings: [], suggestions: [] });
+  assert.deepEqual(events.map(({ state, attempt }) => ({ state, attempt })), [
+    { state: 'start', attempt: 1 },
+    { state: 'retry', attempt: 1 },
+    { state: 'start', attempt: 2 },
+    { state: 'complete', attempt: 2 },
+  ]);
+  assert.doesNotMatch(JSON.stringify(events), /SECRET_PACKET|brb-review/);
 });
 
 test('runReviewer aborts a timed-out attempt and cleans its directory', async () => {
@@ -624,7 +700,10 @@ test('runReviewer validates inputs before creating or launching an attempt', asy
     { prompt: 'packet', launch: null, validate },
     { prompt: 'packet', launch, validate: null },
     { prompt: 'packet', launch, validate, timeoutMs: 0 },
-    { prompt: 'packet', launch, validate, timeoutMs: 600_001 },
+    { prompt: 'packet', launch, validate, timeoutMs: 1_800_001 },
+    { prompt: 'packet', launch, validate, timeoutMs: 10, inactivityTimeoutMs: 0 },
+    { prompt: 'packet', launch, validate, timeoutMs: 10, inactivityTimeoutMs: 11 },
+    { prompt: 'packet', launch, validate, onAttemptEvent: 'invalid' },
     { prompt: 'packet', launch, validate, retries: 2 },
   ];
 
@@ -971,6 +1050,7 @@ test('run-claude CLI retries once and writes only normalized validated JSON', as
       '--protocol', 'brb-review',
       '--angle', FEATURE_ANGLE,
       '--timeout-ms', '25',
+      '--inactivity-timeout-ms', '20',
       '--output', './review.json',
     ],
     {

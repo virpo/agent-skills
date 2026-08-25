@@ -59,14 +59,35 @@ export class ReviewerOutputLimitError extends Error {
   }
 }
 
-function validateRunOptions({ prompt, launch, validate, timeoutMs, retries, signal }) {
+export class ReviewerInactivityError extends Error {
+  constructor(timeoutMs) {
+    super(`Reviewer produced no activity for ${timeoutMs} ms`);
+    this.name = 'ReviewerInactivityError';
+  }
+}
+
+function validateRunOptions({
+  prompt,
+  launch,
+  validate,
+  timeoutMs,
+  inactivityTimeoutMs,
+  retries,
+  signal,
+  onAttemptEvent,
+}) {
   if (typeof prompt !== 'string' || prompt.trim().length === 0) {
     throw new TypeError('prompt must be a non-empty string');
   }
   if (typeof launch !== 'function') throw new TypeError('launch must be a function');
   if (typeof validate !== 'function') throw new TypeError('validate must be a function');
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) {
-    throw new TypeError('timeoutMs must be an integer from 1 to 600000');
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 1_800_000) {
+    throw new TypeError('timeoutMs must be an integer from 1 to 1800000');
+  }
+  if (!Number.isInteger(inactivityTimeoutMs)
+    || inactivityTimeoutMs < 1
+    || inactivityTimeoutMs > timeoutMs) {
+    throw new TypeError('inactivityTimeoutMs must be an integer from 1 through timeoutMs');
   }
   if (retries !== 0 && retries !== 1) {
     throw new TypeError('retries must be 0 or 1');
@@ -76,6 +97,9 @@ function validateRunOptions({ prompt, launch, validate, timeoutMs, retries, sign
       || typeof signal.aborted !== 'boolean'
       || typeof signal.addEventListener !== 'function')) {
     throw new TypeError('signal must be an AbortSignal');
+  }
+  if (onAttemptEvent !== undefined && typeof onAttemptEvent !== 'function') {
+    throw new TypeError('onAttemptEvent must be a function');
   }
 }
 
@@ -91,10 +115,21 @@ export async function runReviewer({
   launch,
   validate,
   timeoutMs = 420_000,
+  inactivityTimeoutMs = Math.min(300_000, timeoutMs),
   retries = 1,
   signal,
+  onAttemptEvent,
 }) {
-  validateRunOptions({ prompt, launch, validate, timeoutMs, retries, signal });
+  validateRunOptions({
+    prompt,
+    launch,
+    validate,
+    timeoutMs,
+    inactivityTimeoutMs,
+    retries,
+    signal,
+    onAttemptEvent,
+  });
   if (signal?.aborted) throw signal.reason;
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -102,21 +137,41 @@ export async function runReviewer({
     const controller = new AbortController();
     let preserveDirectory = false;
     let retryableFailure = false;
-    let timedOut = false;
-    let timer;
+    let watchdogError;
+    let hardTimer;
+    let inactivityTimer;
+    let lastActivityAt = Date.now();
     const timeoutError = new Error(`Reviewer timed out after ${timeoutMs} ms`);
     const abortFromParent = () => controller.abort(signal.reason);
+    const event = (state, failureCategory = null) => onAttemptEvent?.({
+      state,
+      attempt: attempt + 1,
+      failureCategory,
+      lastActivityAgeMs: Math.max(0, Date.now() - lastActivityAt),
+    });
+    const abortFromWatchdog = (error) => {
+      if (controller.signal.aborted) return;
+      watchdogError = error;
+      controller.abort(error);
+    };
+    const resetInactivityTimer = () => {
+      lastActivityAt = Date.now();
+      clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(
+        () => abortFromWatchdog(new ReviewerInactivityError(inactivityTimeoutMs)),
+        inactivityTimeoutMs,
+      );
+    };
 
     try {
+      event('start');
       signal?.addEventListener('abort', abortFromParent, { once: true });
       if (signal?.aborted) {
         abortFromParent();
         throw signal.reason;
       }
-      timer = setTimeout(() => {
-        timedOut = true;
-        controller.abort(timeoutError);
-      }, timeoutMs);
+      hardTimer = setTimeout(() => abortFromWatchdog(timeoutError), timeoutMs);
+      resetInactivityTimer();
       let output;
       try {
         // Injected launchers must honor AbortSignal and settle only after any
@@ -125,33 +180,35 @@ export async function runReviewer({
           cwd: directory,
           input: prompt,
           signal: controller.signal,
-          onActivity: () => {},
+          onActivity: resetInactivityTimer,
         });
       } catch (error) {
         if (error instanceof UnterminatedReviewerChildError) throw error;
         if (error instanceof ReviewerOutputLimitError) throw error;
         if (signal?.aborted) throw signal.reason;
-        if (timedOut && error === controller.signal.reason) {
+        if (watchdogError && error === controller.signal.reason) {
           retryableFailure = true;
           throw error;
         }
-        if (timedOut && error?.name === 'AbortError') {
+        if (watchdogError && error?.name === 'AbortError') {
           retryableFailure = true;
-          throw new Error(`Reviewer timed out after ${timeoutMs} ms`, { cause: error });
+          throw new Error(watchdogError.message, { cause: error });
         }
         throw error;
       }
       if (signal?.aborted) throw signal.reason;
-      if (timedOut) {
+      if (watchdogError) {
         retryableFailure = true;
-        throw timeoutError;
+        throw watchdogError;
       }
       if (typeof output !== 'string') {
         retryableFailure = true;
         throw new TypeError('launch must resolve to a string');
       }
       try {
-        return await validate(output);
+        const result = await validate(output);
+        event('complete');
+        return result;
       } catch (error) {
         retryableFailure = true;
         throw error;
@@ -162,8 +219,15 @@ export async function runReviewer({
         throw error;
       }
       if (!retryableFailure || attempt === retries) throw error;
+      const failureCategory = watchdogError instanceof ReviewerInactivityError
+        ? 'inactivity'
+        : watchdogError
+          ? 'timeout'
+          : 'malformed-output';
+      event('retry', failureCategory);
     } finally {
-      clearTimeout(timer);
+      clearTimeout(hardTimer);
+      clearTimeout(inactivityTimer);
       signal?.removeEventListener('abort', abortFromParent);
       if (!preserveDirectory) await removeReviewDirectory(directory);
     }
@@ -380,12 +444,12 @@ export function launchCodex(options, { model, ...dependencies } = {}) {
 function usage() {
   return [
     'Usage:',
-    '  reviewer-runner.mjs run-claude --model MODEL --prompt-file FILE --protocol brb-review --angle ANGLE --timeout-ms NUMBER --output FILE',
-    '  reviewer-runner.mjs run-claude --model MODEL --prompt-file FILE --protocol brb-reproduction --expected-ids-file IDS.json --timeout-ms NUMBER --output FILE',
-    '  reviewer-runner.mjs run-claude --model MODEL --prompt-file FILE --protocol brb-verification --expected-ids-file IDS.json --timeout-ms NUMBER --output FILE',
-    '  reviewer-runner.mjs run-codex --model MODEL --prompt-file FILE --protocol brb-review --angle ANGLE --timeout-ms NUMBER --output FILE',
-    '  reviewer-runner.mjs run-codex --model MODEL --prompt-file FILE --protocol brb-reproduction --expected-ids-file IDS.json --timeout-ms NUMBER --output FILE',
-    '  reviewer-runner.mjs run-codex --model MODEL --prompt-file FILE --protocol brb-verification --expected-ids-file IDS.json --timeout-ms NUMBER --output FILE',
+    '  reviewer-runner.mjs run-claude --model MODEL --prompt-file FILE --protocol brb-review --angle ANGLE --timeout-ms NUMBER [--inactivity-timeout-ms NUMBER] --output FILE',
+    '  reviewer-runner.mjs run-claude --model MODEL --prompt-file FILE --protocol brb-reproduction --expected-ids-file IDS.json --timeout-ms NUMBER [--inactivity-timeout-ms NUMBER] --output FILE',
+    '  reviewer-runner.mjs run-claude --model MODEL --prompt-file FILE --protocol brb-verification --expected-ids-file IDS.json --timeout-ms NUMBER [--inactivity-timeout-ms NUMBER] --output FILE',
+    '  reviewer-runner.mjs run-codex --model MODEL --prompt-file FILE --protocol brb-review --angle ANGLE --timeout-ms NUMBER [--inactivity-timeout-ms NUMBER] --output FILE',
+    '  reviewer-runner.mjs run-codex --model MODEL --prompt-file FILE --protocol brb-reproduction --expected-ids-file IDS.json --timeout-ms NUMBER [--inactivity-timeout-ms NUMBER] --output FILE',
+    '  reviewer-runner.mjs run-codex --model MODEL --prompt-file FILE --protocol brb-verification --expected-ids-file IDS.json --timeout-ms NUMBER [--inactivity-timeout-ms NUMBER] --output FILE',
   ].join('\n');
 }
 
@@ -396,6 +460,7 @@ function readOptions(args) {
     'angle',
     'expected-ids-file',
     'timeout-ms',
+    'inactivity-timeout-ms',
     'output',
     'model',
   ]);
@@ -422,13 +487,26 @@ function requireOption(options, name) {
 
 function timeoutOption(value) {
   if (!/^\d+$/.test(value)) {
-    throw new TypeError('--timeout-ms must be an integer from 1 to 600000');
+    throw new TypeError('--timeout-ms must be an integer from 1 to 1800000');
   }
   const timeoutMs = Number(value);
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) {
-    throw new TypeError('--timeout-ms must be an integer from 1 to 600000');
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 1_800_000) {
+    throw new TypeError('--timeout-ms must be an integer from 1 to 1800000');
   }
   return timeoutMs;
+}
+
+function inactivityTimeoutOption(value, timeoutMs) {
+  if (!/^\d+$/.test(value)) {
+    throw new TypeError('--inactivity-timeout-ms must be an integer from 1 through --timeout-ms');
+  }
+  const inactivityTimeoutMs = Number(value);
+  if (!Number.isInteger(inactivityTimeoutMs)
+    || inactivityTimeoutMs < 1
+    || inactivityTimeoutMs > timeoutMs) {
+    throw new TypeError('--inactivity-timeout-ms must be an integer from 1 through --timeout-ms');
+  }
+  return inactivityTimeoutMs;
 }
 
 function protocolValidator(protocol, angle, expectedIds) {
@@ -475,6 +553,9 @@ export async function main(args, dependencies = {}) {
   const expectedIdsFile = options['expected-ids-file'];
   const output = requireOption(options, 'output');
   const timeoutMs = timeoutOption(requireOption(options, 'timeout-ms'));
+  const inactivityTimeoutMs = options['inactivity-timeout-ms'] === undefined
+    ? Math.min(300_000, timeoutMs)
+    : inactivityTimeoutOption(options['inactivity-timeout-ms'], timeoutMs);
   const readFile = dependencies.readFile ?? readFileDefault;
   const writeFile = dependencies.writeFile ?? writeFileDefault;
   const launch = dependencies.launch ?? (command === 'run-codex'
@@ -503,6 +584,7 @@ export async function main(args, dependencies = {}) {
     launch,
     validate,
     timeoutMs,
+    inactivityTimeoutMs,
     retries: 1,
   });
 
