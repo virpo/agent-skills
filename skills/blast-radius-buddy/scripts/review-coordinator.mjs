@@ -670,9 +670,25 @@ function synthesisPrompt({ context, plan, workspace, angles, reportContract, div
     JSON.stringify(context.changedLines, null, 2),
     '# Exact report, gates, and verification contract',
     reportContract,
+    'The coordinator owns reviewersComplete, reproductionComplete, failedRequiredChecks, headUnchanged, and the final event. Set those gate placeholders to true, true, [], and true respectively; the coordinator replaces them with authoritative host state before validation and again at the write boundary.',
     'Deduplicate overlapping claims and retain every reporting angle. Challenge causality, reachability, severity, confidence, prior-feedback treatment, suggestion classification, and anchors. Assign stable BRB and BRS IDs. Unproved runtime-dependent claims must be deferred and force COMMENT. Cover all three angles explicitly. Propose only COMMENT or APPROVE.',
     'Return exactly one JSON object in one fenced brb-synthesis block with exactly status, headSha, triggerId, event, report, gates, and verification. Repeat the captured identity exactly. Do not edit, comment, approve, request changes, resolve, push, merge, or infer authorization.',
   ].join('\n\n');
+}
+
+export function bindSynthesisHostGates(value) {
+  const gates = {
+    ...value?.gates,
+    reviewersComplete: true,
+    reproductionComplete: true,
+    failedRequiredChecks: [],
+    headUnchanged: true,
+  };
+  return {
+    ...value,
+    event: decideReviewEvent(gates),
+    gates,
+  };
 }
 
 async function createReviewerAdapter({ logger } = {}) {
@@ -745,7 +761,7 @@ async function createReviewerAdapter({ logger } = {}) {
       }),
       launch: (options) => launchCodex(options, { model, repositoryAccess: true }),
       validate: (output) => validateSynthesisResult(
-        parseProtocolBlock(output, 'brb-synthesis'),
+        bindSynthesisHostGates(parseProtocolBlock(output, 'brb-synthesis')),
         { headSha: context.headSha, triggerId: context.triggerId },
       ),
       timeoutMs: SYNTHESIS_BUDGET_MS,

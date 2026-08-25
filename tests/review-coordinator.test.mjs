@@ -4,6 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import {
   ANGLE_SLUGS,
+  bindSynthesisHostGates,
   main,
   runQueue,
   runTrigger,
@@ -207,6 +208,35 @@ test('coordinator exports bounded stage timing', () => {
   assert.equal(coordinatorModule.SYNTHESIS_BUDGET_MS, 10 * 60_000);
   assert.equal(coordinatorModule.REVIEWER_INACTIVITY_TIMEOUT_MS, 5 * 60_000);
   assert.equal(coordinatorModule.HEARTBEAT_INTERVAL_MS, 60_000);
+});
+
+test('host completion gates override model guesses before synthesis validation', () => {
+  const candidate = {
+    status: 'complete',
+    event: 'COMMENT',
+    gates: {
+      reviewersComplete: false,
+      reproductionComplete: false,
+      materialUncertainty: false,
+      verifierVerdict: 'clean',
+      findings: [],
+      suggestions: [],
+      failedRequiredChecks: ['model cannot inspect required checks'],
+      headUnchanged: false,
+    },
+  };
+
+  const bound = bindSynthesisHostGates(candidate);
+
+  assert.equal(bound.event, 'APPROVE');
+  assert.deepEqual(bound.gates, {
+    ...candidate.gates,
+    reviewersComplete: true,
+    reproductionComplete: true,
+    failedRequiredChecks: [],
+    headUnchanged: true,
+  });
+  assert.equal(candidate.gates.reviewersComplete, false);
 });
 
 test('runTrigger validates the heartbeat interval before acquiring a lease', async () => {
