@@ -115,11 +115,10 @@ Validated feature-truth-and-adjacent-regressions result:
 
 Deduplicate overlapping claims and retain every reporting angle. Recheck causality, reachability, severity, confidence, prior-feedback treatment, suggestion classification, and anchors against the checkout. Assign stable BRB and BRS IDs. A finding that needs runtime proof but cannot be established through read-only inspection must be deferred, set material uncertainty, and force COMMENT. Every suggestion must be optional, high confidence, safe to ignore indefinitely, and anchored to a supplied changed new-side line. Cover security, system blast radius, and feature truth explicitly. Propose only COMMENT or APPROVE; APPROVE requires no actionable finding, no deferred uncertainty, clean verification, passing required checks, complete reviewers, and an unchanged head.
 
-The coordinator owns `reviewersComplete`, `reproductionComplete`,
-`failedRequiredChecks`, `headUnchanged`, and the final event. Use `true`, `true`,
-`[]`, and `true` as their gate placeholders. The coordinator replaces them and
-the event with authoritative host state before validation and at the write
-boundary.
+The coordinator derives the complete gates object and final event from the
+normalized report, verification, completed reviewer state, required checks, and
+exact-head recheck. Return the required gate fields as placeholders;
+model-supplied gate projections are never authoritative.
 
 Return exactly one JSON object in one fenced `brb-synthesis` block, with no prose before or after it. For a complete result use exactly: status, headSha, triggerId, event, report, gates, and verification. `headSha` and `triggerId` must exactly repeat the captured values. `report`, `gates`, and `verification` must follow `github-report.md`; `report.coverage` must contain non-empty security, blastRadius, and featureTruth entries. For exact missing repository context use only status, headSha, triggerId, and a non-empty missingContext array.
 Do not edit, comment, approve, request changes, resolve, push, merge, or infer authorization. The deterministic coordinator alone performs validated GitHub writes.

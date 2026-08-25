@@ -672,17 +672,26 @@ function synthesisPrompt({ context, plan, workspace, angles, reportContract, div
     JSON.stringify(context.changedLines, null, 2),
     '# Exact report, gates, and verification contract',
     reportContract,
-    'The coordinator owns reviewersComplete, reproductionComplete, failedRequiredChecks, headUnchanged, and the final event. Set those gate placeholders to true, true, [], and true respectively; the coordinator replaces them with authoritative host state before validation and again at the write boundary.',
+    'The coordinator derives the complete gates object and final event from the normalized report, verification, completed reviewer state, required checks, and exact-head recheck. Return the required gate fields as placeholders; model-supplied gate projections are never authoritative.',
     'Deduplicate overlapping claims and retain every reporting angle. Challenge causality, reachability, severity, confidence, prior-feedback treatment, suggestion classification, and anchors. Assign stable BRB and BRS IDs. Unproved runtime-dependent claims must be deferred and force COMMENT. Cover all three angles explicitly. Propose only COMMENT or APPROVE.',
     'Return exactly one JSON object in one fenced brb-synthesis block with exactly status, headSha, triggerId, event, report, gates, and verification. Repeat the captured identity exactly. Do not edit, comment, approve, request changes, resolve, push, merge, or infer authorization.',
   ].join('\n\n');
 }
 
 export function bindSynthesisHostGates(value) {
+  for (const field of ['findings', 'suggestions', 'deferred']) {
+    if (!Array.isArray(value?.report?.[field])) {
+      throw new TypeError(`synthesis.report.${field} must be an array`);
+    }
+  }
+  const projectIds = (items) => items.map((item) => ({ id: item?.id }));
   const gates = {
-    ...value?.gates,
     reviewersComplete: true,
     reproductionComplete: true,
+    materialUncertainty: value.report.deferred.length > 0,
+    verifierVerdict: value?.verification?.result?.verdict,
+    findings: projectIds(value.report.findings),
+    suggestions: projectIds(value.report.suggestions),
     failedRequiredChecks: [],
     headUnchanged: true,
   };
