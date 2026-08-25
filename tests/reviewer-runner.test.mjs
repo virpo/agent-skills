@@ -736,7 +736,7 @@ test('launchClaude uses fixed arguments, minimal environment, and stdin prompt b
   assert.deepEqual(CLAUDE_REVIEW_ARGS, [
     '--safe-mode', '--tools', '', '--disable-slash-commands',
     '--no-session-persistence', '--permission-mode', 'plan', '--print',
-    '--output-format', 'stream-json', '--include-partial-messages',
+    '--output-format', 'stream-json', '--include-partial-messages', '--verbose',
   ]);
   assert.deepEqual(calls[0].args, [...CLAUDE_REVIEW_ARGS, '--model', 'opus']);
   assert.equal(calls[0].args.includes('prompt bytes ; $(never)'), false);

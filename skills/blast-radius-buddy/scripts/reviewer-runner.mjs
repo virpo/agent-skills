@@ -38,7 +38,7 @@ const minimalEnvironment = (keys) => Object.fromEntries(
 export const CLAUDE_REVIEW_ARGS = Object.freeze([
   '--safe-mode', '--tools', '', '--disable-slash-commands',
   '--no-session-persistence', '--permission-mode', 'plan', '--print',
-  '--output-format', 'stream-json', '--include-partial-messages',
+  '--output-format', 'stream-json', '--include-partial-messages', '--verbose',
 ]);
 export const CODEX_REVIEW_ARGS = Object.freeze([
   'exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only',
