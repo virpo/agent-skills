@@ -214,6 +214,17 @@ test('coordinator exports bounded stage timing', () => {
   assert.equal(coordinatorModule.HEARTBEAT_INTERVAL_MS, 60_000);
 });
 
+test('Codex assessment schema is strict enough for structured output', () => {
+  assert.deepEqual(coordinatorModule.CODEX_PLAN_OUTPUT_SCHEMA, {
+    type: 'object',
+    properties: {
+      status: { type: 'string', enum: ['complete', 'needs-context'] },
+    },
+    required: ['status'],
+    additionalProperties: false,
+  });
+});
+
 test('host completion gates override model guesses before synthesis validation', () => {
   const candidate = {
     status: 'complete',

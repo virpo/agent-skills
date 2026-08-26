@@ -59,12 +59,13 @@ export const ANGLE_SLUGS = Object.freeze([
   'system-blast-radius',
   'feature-truth-and-adjacent-regressions',
 ]);
-const CODEX_PLAN_OUTPUT_SCHEMA = Object.freeze({
+export const CODEX_PLAN_OUTPUT_SCHEMA = Object.freeze({
   type: 'object',
   properties: {
     status: { type: 'string', enum: ['complete', 'needs-context'] },
   },
   required: ['status'],
+  additionalProperties: false,
 });
 
 class WholeRunDeadlineError extends Error {
