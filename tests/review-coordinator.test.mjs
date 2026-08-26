@@ -8,6 +8,7 @@ import {
   bindSynthesisHostGates,
   captureContext,
   main,
+  normalizeStructuredReviewResult,
   normalizeStructuredReviewPlan,
   runQueue,
   runTrigger,
@@ -246,6 +247,33 @@ test('needs-context structured plans discard required placeholder fields before 
     triggerId: TRIGGER.triggerId,
     missingContext: ['The generated API contract is absent.'],
   });
+});
+
+test('first-pass schema machine-enforces null prior feedback', () => {
+  const schema = coordinatorModule.REVIEW_OUTPUT_SCHEMA;
+  assert.equal(schema.additionalProperties, false);
+  assert.deepEqual(schema.required.toSorted(), Object.keys(schema.properties).sort());
+  for (const property of ['findings', 'suggestions']) {
+    const item = schema.properties[property].items;
+    assert.equal(item.additionalProperties, false);
+    assert.deepEqual(item.required.toSorted(), Object.keys(item.properties).sort());
+    assert.deepEqual(item.properties.priorFeedback, { type: 'null' });
+  }
+});
+
+test('structured first-pass envelopes project to the exact status contract', () => {
+  assert.deepEqual(normalizeStructuredReviewResult({
+    status: 'complete',
+    findings: [],
+    suggestions: [],
+    missingContext: [],
+  }), { status: 'complete', findings: [], suggestions: [] });
+  assert.deepEqual(normalizeStructuredReviewResult({
+    status: 'needs-context',
+    findings: [],
+    suggestions: [],
+    missingContext: ['An imported contract is absent.'],
+  }), { status: 'needs-context', missingContext: ['An imported contract is absent.'] });
 });
 
 test('host completion gates override model guesses before synthesis validation', () => {

@@ -132,6 +132,101 @@ export function normalizeStructuredReviewPlan(value) {
   };
 }
 
+const REVIEW_EVIDENCE_OUTPUT_SCHEMA = Object.freeze({
+  type: 'object',
+  properties: {
+    path: { type: 'string' },
+    line: { type: 'integer' },
+    behavior: { type: 'string' },
+  },
+  required: ['path', 'line', 'behavior'],
+  additionalProperties: false,
+});
+
+export const REVIEW_OUTPUT_SCHEMA = Object.freeze({
+  type: 'object',
+  properties: {
+    status: { type: 'string', enum: ['complete', 'needs-context'] },
+    findings: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          angle: { type: 'string', enum: ANGLE_SLUGS },
+          severity: { type: 'string', enum: ['critical', 'high', 'medium'] },
+          confidence: { type: 'string', enum: ['high', 'medium'] },
+          title: { type: 'string' },
+          what: { type: 'string' },
+          why: { type: 'string' },
+          reachability: { type: 'string' },
+          impact: { type: 'string' },
+          evidence: { type: 'array', items: REVIEW_EVIDENCE_OUTPUT_SCHEMA },
+          suggestedFix: { type: 'string' },
+          suggestedChange: { type: ['string', 'null'] },
+          mechanical: { type: 'boolean' },
+          priorFeedback: { type: 'null' },
+          reporters: { type: 'array', items: { type: 'string', enum: ANGLE_SLUGS } },
+          needsRuntimeProof: { type: 'boolean' },
+          securitySensitive: { type: 'boolean' },
+          deletionSensitive: { type: 'boolean' },
+          scopeUncertain: { type: 'boolean' },
+        },
+        required: [
+          'angle', 'severity', 'confidence', 'title', 'what', 'why', 'reachability',
+          'impact', 'evidence', 'suggestedFix', 'suggestedChange', 'mechanical',
+          'priorFeedback', 'reporters', 'needsRuntimeProof', 'securitySensitive',
+          'deletionSensitive', 'scopeUncertain',
+        ],
+        additionalProperties: false,
+      },
+    },
+    suggestions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          angle: { type: 'string', enum: ANGLE_SLUGS },
+          confidence: { type: 'string', enum: ['high'] },
+          title: { type: 'string' },
+          improvement: { type: 'string' },
+          benefit: { type: 'string' },
+          evidence: { type: 'array', items: REVIEW_EVIDENCE_OUTPUT_SCHEMA },
+          suggestedChange: { type: ['string', 'null'] },
+          mechanical: { type: 'boolean' },
+          priorFeedback: { type: 'null' },
+          reporters: { type: 'array', items: { type: 'string', enum: ANGLE_SLUGS } },
+        },
+        required: [
+          'angle', 'confidence', 'title', 'improvement', 'benefit', 'evidence',
+          'suggestedChange', 'mechanical', 'priorFeedback', 'reporters',
+        ],
+        additionalProperties: false,
+      },
+    },
+    missingContext: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['status', 'findings', 'suggestions', 'missingContext'],
+  additionalProperties: false,
+});
+
+export function normalizeStructuredReviewResult(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
+  if (value.status === 'complete') {
+    return {
+      status: value.status,
+      findings: value.findings,
+      suggestions: value.suggestions,
+    };
+  }
+  if (value.status === 'needs-context') {
+    return {
+      status: value.status,
+      missingContext: value.missingContext,
+    };
+  }
+  return value;
+}
+
 class WholeRunDeadlineError extends Error {
   constructor() {
     super('Whole-run deadline elapsed');
@@ -835,7 +930,7 @@ function firstPassPrompt({ angle, plan, workspace, reference, structuredJson = f
     angleRubric(reference, angle),
     'Find consequential defects first. Actionable findings must be caused by this PR, regress behavior touched by it, or directly undermine its stated purpose.',
     structuredJson
-      ? 'Return only the required brb-review JSON object as raw JSON with no Markdown fence or prose. Use needs-context only for exact missing code, contract, configuration, or test context.'
+      ? 'Return only the required brb-review JSON object as raw JSON with no Markdown fence or prose. Complete results use an empty missingContext array. Needs-context results use empty findings and suggestions arrays and a non-empty missingContext array. Every first-pass finding and suggestion must set priorFeedback to null; synthesis alone handles prior-review history. Use needs-context only for exact missing code, contract, configuration, or test context.'
       : 'Return only the required JSON envelope in one fenced brb-review block, with no prose before or after it. Use needs-context only for exact missing code, contract, configuration, or test context.',
     'Do not edit, comment, approve, request changes, resolve, push, merge, or infer authorization.',
   ].join('\n\n');
@@ -932,7 +1027,7 @@ async function createReviewerAdapter({ logger } = {}) {
       launch: (options) => launchClaude(options, {
         model,
         repositoryAccess: true,
-        jsonSchema: { type: 'object' },
+        jsonSchema: REVIEW_OUTPUT_SCHEMA,
       }),
       validate: (output) => {
         let value;
@@ -941,7 +1036,7 @@ async function createReviewerAdapter({ logger } = {}) {
         } catch {
           throw new Error('Invalid JSON in structured brb-review output');
         }
-        return validateReviewResult(value, angle);
+        return validateReviewResult(normalizeStructuredReviewResult(value), angle);
       },
       timeoutMs: ANGLE_WAVE_BUDGET_MS,
       inactivityTimeoutMs: REVIEWER_INACTIVITY_TIMEOUT_MS,
@@ -954,9 +1049,17 @@ async function createReviewerAdapter({ logger } = {}) {
     reviewCodex: ({
       angle, context, plan, workspace, model, signal, stageDeadlineAt, replacementFor,
     }) => runReviewer({
-      prompt: firstPassPrompt({ angle, plan, workspace, reference: angleReference }),
-      launch: (options) => launchCodex(options, { model, repositoryAccess: true }),
-      validate: (output) => validateReviewResult(parseProtocolBlock(output, 'brb-review'), angle),
+      prompt: firstPassPrompt({
+        angle, plan, workspace, reference: angleReference, structuredJson: true,
+      }),
+      launch: (options) => launchCodex(options, {
+        model,
+        repositoryAccess: true,
+        jsonSchema: REVIEW_OUTPUT_SCHEMA,
+      }),
+      validate: (output) => validateReviewResult(normalizeStructuredReviewResult(
+        parseStructuredModelJson(output, 'brb-review'),
+      ), angle),
       timeoutMs: ANGLE_WAVE_BUDGET_MS,
       inactivityTimeoutMs: REVIEWER_INACTIVITY_TIMEOUT_MS,
       stageDeadlineAt,
