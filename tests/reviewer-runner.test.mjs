@@ -985,7 +985,7 @@ test('launchCodex repository mode roots the read-only sandbox at the neutral wor
   assert.equal(calls[0].command, '/usr/bin/sandbox-exec');
   assert.deepEqual(calls[0].args, [
     '-f', '/private/profile.sb', 'codex',
-    'exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only',
+    'exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'danger-full-access',
     '--ignore-rules', '--skip-git-repo-check', '--model', 'gpt-5.6-sol',
     '-c', 'shell_environment_policy.inherit=none',
     '--output-schema', '/private/runtime/output-schema.json',

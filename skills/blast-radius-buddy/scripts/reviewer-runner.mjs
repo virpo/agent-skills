@@ -689,7 +689,8 @@ export async function launchCodex(
     throw new Error('Codex sandbox did not provide an output schema path');
   }
   const args = [
-    'exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only',
+    'exec', '--ephemeral', '--ignore-user-config', '--sandbox',
+    repositoryAccess ? 'danger-full-access' : 'read-only',
     '--ignore-rules', '--skip-git-repo-check', '--model', model,
     '-c', 'shell_environment_policy.inherit=none',
     ...(sandbox?.schemaPath === undefined ? [] : ['--output-schema', sandbox.schemaPath]),
