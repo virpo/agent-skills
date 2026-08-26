@@ -46,7 +46,10 @@ maintainability without an observable consequence.
 8. Pass the normalized report, captured diff, verification artifact, and gates
    to `scripts/github-review.mjs prepare`, then pass the same report, diff,
    verification, gates, body, and comments to `submit`. It recomputes the event
-   and rechecks the exact head at the write boundary before POST.
+   and rechecks the exact head at the write boundary before POST. An actionable
+   root review includes a compact severity-and-title index. After submission,
+   `submit` validates the created inline discussions and updates that same review
+   so every anchored title links to its exact discussion.
 9. Update the one marker with the final review link. Never submit
    `REQUEST_CHANGES`, duplicate a finding, or use an unreliable inline anchor.
 

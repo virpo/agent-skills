@@ -588,6 +588,14 @@ export async function runTrigger(options) {
       authorizeWrite,
       signal: controller.signal,
     });
+    if (submission.summaryWarning !== undefined) {
+      log(logger, {
+        event: 'review-summary-warning',
+        pr: trigger.number,
+        triggerId: trigger.triggerId,
+        reason: submission.summaryWarning,
+      });
+    }
     await authorizeWrite();
     await marker.complete({
       trigger,

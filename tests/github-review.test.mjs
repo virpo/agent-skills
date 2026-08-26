@@ -1186,13 +1186,7 @@ test('submitReview rejects a forged APPROVE artifact before any GitHub call', as
 });
 
 test('submitReview re-prepares source artifacts then checks the exact head immediately before POST', async () => {
-  const diff = [
-    '--- a/src/paging.ts',
-    '+++ b/src/paging.ts',
-    '@@ -42 +42 @@',
-    '-old line',
-    '+new line',
-  ].join('\n');
+  const diff = '';
   const prepared = prepareReview(
     clone(REPORT),
     diff,
@@ -1229,6 +1223,182 @@ test('submitReview re-prepares source artifacts then checks the exact head immed
   assert.deepEqual(operations, ['check-head', 'authorize-write', 'post-review']);
   assert.equal(payload.event, 'COMMENT');
   assert.equal(payload.commit_id, HEAD_SHA);
+});
+
+test('submitReview updates the same review with exact inline discussion links', async () => {
+  const diff = [
+    '--- a/src/paging.ts',
+    '+++ b/src/paging.ts',
+    '@@ -42 +42 @@',
+    '-old line',
+    '+new line',
+  ].join('\n');
+  const submission = sourceSubmission(REPORT, diff, COMMENT_GATES, COMMENT_VERIFICATION);
+  const discussionUrl = 'https://github.com/acme/widget/pull/19#discussion_r123';
+  const operations = [];
+  let updatePayload;
+  let authorizeCalls = 0;
+  const execute = async (command, args) => {
+    assert.equal(command, 'gh');
+    if (args[0] === 'pr') {
+      operations.push('check-head');
+      return matchingHeadResponse();
+    }
+    if (args.includes('POST')) {
+      operations.push('post-review');
+      return { stdout: JSON.stringify({ id: 9, html_url: REVIEW_URL }) };
+    }
+    if (args.includes('PUT')) {
+      operations.push('put-review');
+      updatePayload = JSON.parse(await readFile(args.at(-1), 'utf8'));
+      return { stdout: JSON.stringify({ id: 9, html_url: REVIEW_URL }) };
+    }
+    operations.push('read-comments');
+    return { stdout: JSON.stringify([[
+      {
+        pull_request_review_id: 9,
+        html_url: discussionUrl,
+        body: submission.comments[0].body,
+      },
+    ]]) };
+  };
+
+  const result = await submitReview({
+    ...submission,
+    execute,
+    authorizeWrite: async () => { authorizeCalls += 1; },
+  });
+
+  assert.deepEqual(result, { reviewId: 9, reviewUrl: REVIEW_URL });
+  assert.deepEqual(operations, [
+    'check-head',
+    'post-review',
+    'read-comments',
+    'check-head',
+    'put-review',
+  ]);
+  assert.equal(authorizeCalls, 2);
+  assert.match(
+    updatePayload.body,
+    /\*\*High\*\* — \[The final full page is skipped\]\(https:\/\/github\.com\/acme\/widget\/pull\/19#discussion_r123\)/,
+  );
+  assert.equal(
+    updatePayload.body.match(/<!-- blast-radius-buddy-review:([\s\S]+) -->$/)[1],
+    submission.body.match(/<!-- blast-radius-buddy-review:([\s\S]+) -->$/)[1],
+  );
+});
+
+test('submitReview accepts GitHub documented discussion-diff links', async () => {
+  const diff = [
+    '--- a/src/paging.ts',
+    '+++ b/src/paging.ts',
+    '@@ -42 +42 @@',
+    '-old line',
+    '+new line',
+  ].join('\n');
+  const submission = sourceSubmission(REPORT, diff, COMMENT_GATES, COMMENT_VERIFICATION);
+  const discussionUrl = 'https://github.com/acme/widget/pull/19#discussion-diff-123';
+  let updatePayload;
+  const execute = async (_command, args) => {
+    if (args[0] === 'pr') return matchingHeadResponse();
+    if (args.includes('POST') || args.includes('PUT')) {
+      if (args.includes('PUT')) {
+        updatePayload = JSON.parse(await readFile(args.at(-1), 'utf8'));
+      }
+      return { stdout: JSON.stringify({ id: 9, html_url: REVIEW_URL }) };
+    }
+    return { stdout: JSON.stringify([[
+      {
+        pull_request_review_id: 9,
+        html_url: discussionUrl,
+        body: submission.comments[0].body,
+      },
+    ]]) };
+  };
+
+  const result = await submitReview({ ...submission, execute });
+
+  assert.deepEqual(result, { reviewId: 9, reviewUrl: REVIEW_URL });
+  assert.match(updatePayload.body, /\(https:\/\/github\.com\/acme\/widget\/pull\/19#discussion-diff-123\)/);
+});
+
+test('submitReview keeps the created review when link enrichment fails', async () => {
+  const diff = [
+    '--- a/src/paging.ts',
+    '+++ b/src/paging.ts',
+    '@@ -42 +42 @@',
+    '-old line',
+    '+new line',
+  ].join('\n');
+  const submission = sourceSubmission(REPORT, diff, COMMENT_GATES, COMMENT_VERIFICATION);
+  let posts = 0;
+  const execute = async (_command, args) => {
+    if (args[0] === 'pr') return matchingHeadResponse();
+    if (args.includes('POST')) {
+      posts += 1;
+      return { stdout: JSON.stringify({ id: 9, html_url: REVIEW_URL }) };
+    }
+    throw new Error('GitHub comment lookup failed');
+  };
+
+  const result = await submitReview({ ...submission, execute });
+
+  assert.deepEqual(result, {
+    reviewId: 9,
+    reviewUrl: REVIEW_URL,
+    summaryWarning: 'Native review finding links could not be added',
+  });
+  assert.equal(posts, 1);
+});
+
+test('submitReview refuses untrusted finding links without duplicating the review', async (t) => {
+  const diff = [
+    '--- a/src/paging.ts',
+    '+++ b/src/paging.ts',
+    '@@ -42 +42 @@',
+    '-old line',
+    '+new line',
+  ].join('\n');
+  const submission = sourceSubmission(REPORT, diff, COMMENT_GATES, COMMENT_VERIFICATION);
+  const validComment = {
+    pull_request_review_id: 9,
+    html_url: 'https://github.com/acme/widget/pull/19#discussion_r123',
+    body: submission.comments[0].body,
+  };
+  const cases = [
+    ['malformed marker', [{
+      ...validComment,
+      body: validComment.body.replace(/:BRBK1_[0-9a-f]{64} -->$/, ' -->'),
+    }]],
+    ['foreign review', [{ ...validComment, pull_request_review_id: 10 }]],
+    ['duplicate finding', [validComment, { ...validComment }]],
+    ['foreign pull request', [{
+      ...validComment,
+      html_url: 'https://github.com/acme/other/pull/19#discussion_r123',
+    }]],
+  ];
+
+  for (const [name, comments] of cases) {
+    await t.test(name, async () => {
+      let posts = 0;
+      let puts = 0;
+      const execute = async (_command, args) => {
+        if (args[0] === 'pr') return matchingHeadResponse();
+        if (args.includes('POST')) {
+          posts += 1;
+          return { stdout: JSON.stringify({ id: 9, html_url: REVIEW_URL }) };
+        }
+        if (args.includes('PUT')) puts += 1;
+        return { stdout: JSON.stringify([comments]) };
+      };
+
+      const result = await submitReview({ ...submission, execute });
+
+      assert.equal(result.summaryWarning, 'Native review finding links could not be added');
+      assert.equal(posts, 1);
+      assert.equal(puts, 0);
+    });
+  }
 });
 
 test('submitReview rejects a stale head after one read and performs no POST', async () => {

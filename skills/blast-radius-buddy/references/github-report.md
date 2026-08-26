@@ -252,6 +252,8 @@ node skills/blast-radius-buddy/scripts/github-review.mjs submit \
 
 `submit` recomputes and strictly validates `REPORT.json`, `PR.diff`, `GATES.json`, `VERIFICATION.json`, and the trigger; derives the event again; and rejects any body or comments that differ from that preparation. It accepts no caller-supplied event, head, digest, or approval artifact. Immediately before the GitHub POST, it reads the current PR head and rejects a stale review without posting. It rejects a returned native review state that contradicts the derived event and never accepts `REQUEST_CHANGES`.
 
+After an actionable review is created, `submit` reads only that review's inline comments, validates each finding's review ID, linkage marker, and PR-scoped GitHub discussion URL, then updates the same review body with exact discussion links. A lookup, validation, stale-head, or update failure preserves the already-created useful review, creates no duplicate, and emits an observable summary warning.
+
 `review-history.mjs` scopes each review-linkage fingerprint to its GitHub review ID. It joins that review's root metadata and inline thread, but preserves entries from every separate review even when their IDs or fingerprints match. Cross-run duplicate suppression is host semantic judgment over the complete ledger, including paraphrased findings; fingerprint equality is never proof of semantic equality across runs.
 
 Every native review starts with the same small title:
@@ -264,8 +266,8 @@ Follow it with one conclusion:
 
 - clean approval: `Nothing needs redoing. Good to go.`
 - approval with one verified suggestion: `Good to go. One small suggestion is inline.`
-- one fully anchored finding: `One thing needs another pass; details are inline.`
-- one unanchored finding: `One thing needs another pass:` followed by its root-only detail
+- one fully anchored finding: `One thing needs another pass:` followed by `- **High** — [Short title](exact discussion URL)`
+- one unanchored finding: `One thing needs another pass:` followed by `- **High** — Short title _(details below)_` and its root-only detail
 - uncertainty: `One risk needs a human call:` followed by the deferred item
 - one finding plus one deferred risk: `One thing needs another pass, and one risk needs a human call:` followed by the useful details
 
@@ -275,7 +277,7 @@ Use natural plural forms for larger counts. End every completed native review wi
 <sub>3 reviewers · 1 fresh-eyes check</sub>
 ```
 
-Do not visibly repeat the verdict, reviewed head, prior-feedback recap, validation steps, coverage by angle, or run statistics. Those facts remain in the validated source artifacts and hidden review metadata. Root review copy states the result; inline comments carry anchored details.
+Do not visibly repeat the verdict, reviewed head, prior-feedback recap, validation steps, coverage by angle, or run statistics. Those facts remain in the validated source artifacts and hidden review metadata. An actionable root review lists every finding once with severity and a short title. Anchored titles link to their exact inline discussion; body-only titles point to the detail below.
 
 Each inline comment also starts with `### 🧨 Blast Radius Buddy`; do not repeat the brand in its body. Anchor an inline comment only to a valid PR-relative new-side changed line. Preserve a finding in the review body when no reliable anchor exists. Every suggestion requires a reliable changed-line anchor; drop it before reporting or stop preparation. A suggestion inline comment is labeled `Non-blocking suggestion` and carries its `BRS001`-style ID in a `blast-radius-buddy-suggestion` marker. Include a suggested-change block only when the replacement is local, mechanical, same-file, and safe to apply without judgment. Keep cross-file, architectural, generated-code, deleted-line, or uncertain fixes as prose suggestions.
 

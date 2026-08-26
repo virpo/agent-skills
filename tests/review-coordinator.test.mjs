@@ -553,6 +553,23 @@ test('completion binds state, marker, and submission to the exact trigger withou
   );
 });
 
+test('post-submit finding-link failures are observable without duplicating the review', async () => {
+  const { events, options } = harness();
+  const originalSubmit = options.github.submit;
+  options.github.submit = async (request) => ({
+    ...await originalSubmit(request),
+    summaryWarning: 'Native review finding links could not be added',
+  });
+
+  const result = await runTrigger(options);
+
+  assert.equal(result.status, 'complete');
+  assert.equal(events.filter((event) => event === `github:submit:${TRIGGER.triggerId}`).length, 1);
+  assert.ok(events.some((event) => event?.log?.event === 'review-summary-warning'
+    && event.log.reason === 'Native review finding links could not be added'));
+  assert.ok(events.includes(`state:success:${TRIGGER.triggerId}`));
+});
+
 test('quiet-until-complete makes no GitHub write when any stage or gate fails', async () => {
   const failures = [
     (options) => { options.reviewers.assess = async () => { throw new Error('assessment failed'); }; },

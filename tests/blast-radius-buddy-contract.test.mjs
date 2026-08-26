@@ -48,6 +48,7 @@ test('documents the native high-signal PR review contract', async () => {
     skill,
     /report.*diff.*verification.*gate.*submit.*recheck.*head.*write boundary/is,
   );
+  assert.match(skill, /compact severity-and-title index.*exact discussion/is);
   assert.match(skill, /Do not add tests, edit production code, apply fixes, commit, or push/i);
   assert.match(skill, /safe to ignore indefinitely/i);
   assert.match(angles, /at most one.*suggestion.*per angle/is);
@@ -59,6 +60,8 @@ test('documents the native high-signal PR review contract', async () => {
   assert.match(report, /Every native review.*small title[\s\S]*one conclusion/is);
   assert.match(report, /Do not visibly repeat the verdict.*reviewed head.*validation.*coverage/is);
   assert.match(report, /Each inline comment also starts with `### 🧨 Blast Radius Buddy`/);
+  assert.match(report, /every finding once with severity.*short title.*exact inline discussion/is);
+  assert.match(report, /failure preserves.*review.*no duplicate.*summary warning/is);
   assert.match(report, /Non-blocking suggestion/);
   assert.match(report, /Approve.*suggestions.*findings.*deferred/is);
   assert.match(report, /suggestions.*at most 3/is);

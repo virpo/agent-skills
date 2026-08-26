@@ -33,7 +33,9 @@ const HEAD_SHA_PATTERN = /^[0-9a-f]{40}$/i;
 const FINDING_ID_PATTERN = /^BRB(?:00[1-9]|0[1-9]\d|[1-9]\d{2,5})$/;
 const SUGGESTION_ID_PATTERN = /^BRS(?:00[1-9]|0[1-9]\d|[1-9]\d{2,5})$/;
 const FINDING_MARKER_PATTERN = /<!-- blast-radius-buddy-finding:BRB(?:00[1-9]|0[1-9]\d|[1-9]\d{2,5})(?::BRBK1_[0-9a-f]{64})? -->$/;
+const FINDING_MARKER_CAPTURE_PATTERN = /<!-- blast-radius-buddy-finding:(BRB(?:00[1-9]|0[1-9]\d|[1-9]\d{2,5})):(BRBK1_[0-9a-f]{64}) -->$/;
 const SUGGESTION_MARKER_PATTERN = /<!-- blast-radius-buddy-suggestion:BRS(?:00[1-9]|0[1-9]\d|[1-9]\d{2,5}):BRBK1_[0-9a-f]{64} -->$/;
+const FINDING_LINK_WARNING = 'Native review finding links could not be added';
 const REPORT_FIELDS = [
   'verdict', 'headSha', 'findings', 'suggestions', 'priorFeedback', 'validation', 'deferred',
   'coverage',
@@ -576,7 +578,7 @@ function markdownLinkText(value) {
 
 function githubDiscussionUrl(value, label) {
   if (typeof value !== 'string'
-    || !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9]\d*#discussion_(?:r\d+|diff-\d+)$/.test(value)) {
+    || !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9]\d*#(?:discussion_r\d+|discussion-diff-\d+)$/.test(value)) {
     throw new TypeError(`${label} must be a GitHub pull-request discussion URL`);
   }
   return value;
@@ -948,7 +950,14 @@ function partitionInlineSuggestions(suggestions, changedLines) {
   });
 }
 
-export function prepareReview(report, diff, gates, verification, triggerId) {
+function prepareReviewArtifacts(
+  report,
+  diff,
+  gates,
+  verification,
+  triggerId,
+  { findingLinks = new Map() } = {},
+) {
   const normalized = validateNormalizedReport(report);
   const normalizedTriggerId = triggerId === undefined
     ? undefined
@@ -1033,6 +1042,7 @@ export function prepareReview(report, diff, gates, verification, triggerId) {
     bodyFindings,
     bodySuggestions: [],
     inlineSuggestionCount: suggestionComments.length,
+    findingLinks,
     bodyOnlyFindingIds: new Set(bodyFindings.map(({ id }) => id)),
     triggerId: normalizedTriggerId,
   });
@@ -1046,6 +1056,10 @@ export function prepareReview(report, diff, gates, verification, triggerId) {
   };
 }
 
+export function prepareReview(report, diff, gates, verification, triggerId) {
+  return prepareReviewArtifacts(report, diff, gates, verification, triggerId);
+}
+
 function validateComment(comment, index) {
   assertExactFields(comment, ['path', 'line', 'body'], `comments[${index}]`);
   const path = repositoryPath(comment.path, `comments[${index}].path`);
@@ -1055,6 +1069,72 @@ function validateComment(comment, index) {
     throw new TypeError(`comments[${index}].body must end with a stable review marker`);
   }
   return { path, line, side: 'RIGHT', body };
+}
+
+function findingMarkerFromBody(body) {
+  if (typeof body !== 'string') return null;
+  const match = body.match(FINDING_MARKER_CAPTURE_PATTERN);
+  return match === null ? null : { id: match[1], linkage: match[2] };
+}
+
+function expectedFindingMarkers(comments) {
+  const expected = new Map();
+  for (const comment of comments) {
+    const marker = findingMarkerFromBody(comment.body);
+    if (marker === null) continue;
+    if (expected.has(marker.id)) {
+      throw new TypeError(`Prepared review has duplicate inline finding ${marker.id}`);
+    }
+    expected.set(marker.id, marker.linkage);
+  }
+  return expected;
+}
+
+function parseReviewComments(result, { repo, number, reviewId, expected }) {
+  const stdout = typeof result === 'string' ? result : result?.stdout;
+  let pages;
+  try {
+    pages = JSON.parse(stdout);
+  } catch (error) {
+    throw new Error(`Invalid JSON from review comments: ${error.message}`);
+  }
+  if (!Array.isArray(pages) || pages.some((page) => !Array.isArray(page))) {
+    throw new Error('Review comments response must contain paginated arrays');
+  }
+
+  const links = new Map();
+  for (const comment of pages.flat()) {
+    if (!plainObject(comment) || typeof comment.body !== 'string') {
+      throw new Error('Review comments response contains an invalid comment');
+    }
+    const marker = findingMarkerFromBody(comment.body);
+    if (marker === null) {
+      if (comment.body.includes('<!-- blast-radius-buddy-finding:')) {
+        throw new Error('Review comments response contains a malformed finding marker');
+      }
+      continue;
+    }
+    if (comment.pull_request_review_id !== reviewId) {
+      throw new Error(`Finding ${marker.id} belongs to a different review`);
+    }
+    if (expected.get(marker.id) !== marker.linkage) {
+      throw new Error(`Finding ${marker.id} does not match the submitted review`);
+    }
+    if (links.has(marker.id)) {
+      throw new Error(`Review comments response has duplicate finding ${marker.id}`);
+    }
+    const discussionUrl = githubDiscussionUrl(comment.html_url, `finding ${marker.id} URL`);
+    const parsedUrl = new URL(discussionUrl);
+    if (parsedUrl.pathname.toLowerCase() !== `/${repo}/pull/${number}`.toLowerCase()) {
+      throw new Error(`Finding ${marker.id} URL belongs to a different pull request`);
+    }
+    links.set(marker.id, discussionUrl);
+  }
+
+  for (const id of expected.keys()) {
+    if (!links.has(id)) throw new Error(`Review comments response is missing finding ${id}`);
+  }
+  return links;
 }
 
 function validateSubmission(options) {
@@ -1106,6 +1186,15 @@ function validateSubmission(options) {
     event: recomputed.event,
     body: recomputed.body,
     comments: recomputed.comments.map(validateComment),
+    expectedFindingMarkers: expectedFindingMarkers(recomputed.comments),
+    linkedBody: (findingLinks) => prepareReviewArtifacts(
+      report,
+      diff,
+      gates,
+      verification,
+      triggerId,
+      { findingLinks },
+    ).body,
     execute,
     authorizeWrite,
     signal,
@@ -1153,6 +1242,7 @@ export async function submitReview(options) {
   };
   const directory = await mkdtemp(join(tmpdir(), 'blast-radius-buddy-review-'));
   const payloadFile = join(directory, 'payload.json');
+  const updateFile = join(directory, 'update.json');
 
   try {
     await writeFileDefault(payloadFile, JSON.stringify(payload), { encoding: 'utf8', mode: 0o600 });
@@ -1172,7 +1262,51 @@ export async function submitReview(options) {
       '--input',
       payloadFile,
     ], { signal: validated.signal });
-    return parseReviewResponse(response, validated.event);
+    const submitted = parseReviewResponse(response, validated.event);
+    if (validated.expectedFindingMarkers.size === 0) return submitted;
+
+    try {
+      const commentsResponse = await validated.execute('gh', [
+        'api',
+        `repos/${validated.repo}/pulls/${validated.number}/reviews/${submitted.reviewId}/comments`,
+        '--paginate',
+        '--slurp',
+      ], { signal: validated.signal });
+      const findingLinks = parseReviewComments(commentsResponse, {
+        repo: validated.repo,
+        number: validated.number,
+        reviewId: submitted.reviewId,
+        expected: validated.expectedFindingMarkers,
+      });
+      await writeFileDefault(
+        updateFile,
+        JSON.stringify({ body: validated.linkedBody(findingLinks) }),
+        { encoding: 'utf8', mode: 0o600 },
+      );
+      await assertHeadUnchanged({
+        repo: validated.repo,
+        number: validated.number,
+        expectedHeadSha: validated.headSha,
+        execute: validated.execute,
+      });
+      await validated.authorizeWrite();
+      if (validated.signal?.aborted) throw validated.signal.reason;
+      const updateResponse = await validated.execute('gh', [
+        'api',
+        '--method',
+        'PUT',
+        `repos/${validated.repo}/pulls/${validated.number}/reviews/${submitted.reviewId}`,
+        '--input',
+        updateFile,
+      ], { signal: validated.signal });
+      const updated = parseReviewResponse(updateResponse, validated.event);
+      if (updated.reviewId !== submitted.reviewId) {
+        throw new Error('Updated review response refers to a different review');
+      }
+      return submitted;
+    } catch {
+      return { ...submitted, summaryWarning: FINDING_LINK_WARNING };
+    }
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
