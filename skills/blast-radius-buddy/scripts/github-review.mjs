@@ -561,12 +561,51 @@ function appendItems(lines, items, formatter) {
   });
 }
 
+function compactVisibleText(value, label) {
+  return visibleText(nonEmptyString(value, label)).replace(/\s+/g, ' ').trim();
+}
+
+function severityLabel(value, label) {
+  const severity = compactVisibleText(value, label);
+  return `${severity[0].toUpperCase()}${severity.slice(1)}`;
+}
+
+function markdownLinkText(value) {
+  return value.replaceAll('\\', '\\\\').replaceAll('[', '\\[').replaceAll(']', '\\]');
+}
+
+function githubDiscussionUrl(value, label) {
+  if (typeof value !== 'string'
+    || !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9]\d*#discussion_(?:r\d+|diff-\d+)$/.test(value)) {
+    throw new TypeError(`${label} must be a GitHub pull-request discussion URL`);
+  }
+  return value;
+}
+
+function formatFindingIndexItem(finding, index, { findingLinks, bodyOnlyFindingIds }) {
+  const id = stableFindingId(finding.id, `findings[${index}].id`);
+  const severity = severityLabel(finding.severity, `findings[${index}].severity`);
+  const title = compactVisibleText(finding.title, `findings[${index}].title`);
+  const rawUrl = findingLinks.get(id);
+  const subject = rawUrl === undefined
+    ? title
+    : `[${markdownLinkText(title)}](${githubDiscussionUrl(rawUrl, `findingLinks.${id}`)})`;
+  const detail = bodyOnlyFindingIds.has(id) ? ' _(details below)_' : '';
+  return `- **${severity}** — ${subject}${detail}`;
+}
+
 function buildReviewBodyFromNormalized(normalized, {
   bodyFindings = normalized.findings,
   bodySuggestions = normalized.suggestions,
   inlineSuggestionCount = 0,
+  findingLinks = new Map(),
+  bodyOnlyFindingIds = new Set(bodyFindings.map(({ id }) => id)),
   triggerId,
 } = {}) {
+  if (!(findingLinks instanceof Map)) throw new TypeError('findingLinks must be a Map');
+  if (!(bodyOnlyFindingIds instanceof Set)) {
+    throw new TypeError('bodyOnlyFindingIds must be a Set');
+  }
   const lines = [TITLE, ''];
   const findingCount = normalized.findings.length;
   const suggestionCount = normalized.suggestions.length;
@@ -579,12 +618,18 @@ function buildReviewBodyFromNormalized(normalized, {
     lines.push(
       normalized.deferred.length > 0
         ? `${findingPhrase} ${findingVerb} another pass, and ${riskPhrase} ${riskVerb} a human call:`
-        : bodyFindings.length === 0
-        ? `${findingPhrase} ${findingVerb} another pass; details are inline.`
-        : `${findingPhrase} ${findingVerb} another pass:`,
+        : `${findingPhrase} ${findingVerb} another pass.`,
     );
+    lines.push('');
+    normalized.findings.forEach((finding, index) => {
+      lines.push(formatFindingIndexItem(
+        finding,
+        index,
+        { findingLinks, bodyOnlyFindingIds },
+      ));
+    });
     if (bodyFindings.length > 0) {
-      lines.push('');
+      lines.push('', '#### Details', '');
       appendItems(lines, bodyFindings, formatFinding);
     }
   } else if (suggestionCount > 0) {
@@ -606,7 +651,7 @@ function buildReviewBodyFromNormalized(normalized, {
     const riskPhrase = countPhrase(normalized.deferred.length, 'risk', 'risks');
     if (findingCount === 0) {
       lines.push(`${riskPhrase} ${normalized.deferred.length === 1 ? 'needs' : 'need'} a human call:`);
-    } else if (bodyFindings.length > 0) {
+    } else if (findingCount > 0) {
       lines.push('', '#### Human call');
     }
     lines.push(
@@ -988,6 +1033,7 @@ export function prepareReview(report, diff, gates, verification, triggerId) {
     bodyFindings,
     bodySuggestions: [],
     inlineSuggestionCount: suggestionComments.length,
+    bodyOnlyFindingIds: new Set(bodyFindings.map(({ id }) => id)),
     triggerId: normalizedTriggerId,
   });
   const comments = [...findingComments, ...suggestionComments];

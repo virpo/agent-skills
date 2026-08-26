@@ -264,6 +264,7 @@ test('buildReviewBody leads with one branded conclusion and only useful detail',
 
   assert.equal(body.split('\n')[0], '### 🧨 Blast Radius Buddy');
   assert.match(body, /One thing needs another pass, and one risk needs a human call:/);
+  assert.match(body, /- \*\*High\*\* — The final full page is skipped _\(details below\)_/);
   assert.match(body, /#### BRB001 · \[high \/ high\] The final full page is skipped/);
   assert.match(body, /Windows path handling remains outside this PR\./);
   assert.match(body, /<sub>3 reviewers · 1 fresh-eyes check<\/sub>/);
@@ -1038,8 +1039,12 @@ test('prepareReview deterministically writes safe body metadata and inline findi
   assert.deepEqual(second, first);
   assert.match(first.body, /<!-- blast-radius-buddy-review:/);
   const visibleBody = first.body.replace(/<!-- blast-radius-buddy-review:.* -->/s, '');
-  assert.doesNotMatch(visibleBody, /The final full page is skipped/);
-  assert.match(visibleBody, /Deleted behavior still needs a body finding/);
+  assert.match(visibleBody, /- \*\*High\*\* — The final full page is skipped/);
+  assert.match(
+    visibleBody,
+    /- \*\*High\*\* — Deleted behavior still needs a body finding _\(details below\)_/,
+  );
+  assert.match(visibleBody, /#### BRB002 .*Deleted behavior still needs a body finding/);
   assert.deepEqual(first.comments.map(({ path, line }) => ({ path, line })), [
     { path: 'src/paging.ts', line: 42 },
   ]);
@@ -1075,7 +1080,10 @@ test('prepareReview uses natural plural copy when all findings are inline', () =
 
   const prepared = prepareReview(report, diff, gates, COMMENT_VERIFICATION);
 
-  assert.match(prepared.body, /2 things need another pass; details are inline\./);
+  assert.match(prepared.body, /2 things need another pass\./);
+  assert.match(prepared.body, /- \*\*High\*\* — The final full page is skipped/);
+  assert.match(prepared.body, /- \*\*High\*\* — The empty page is still reachable/);
+  assert.doesNotMatch(prepared.body, /details are inline/);
   assert.equal(prepared.comments.length, 2);
 });
 
