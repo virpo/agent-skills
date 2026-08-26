@@ -78,6 +78,13 @@ export class ReviewerInactivityError extends Error {
   }
 }
 
+export class ReviewerChildExitError extends Error {
+  constructor(provider, reason) {
+    super(`${provider} exited with ${reason}`);
+    this.name = 'ReviewerChildExitError';
+  }
+}
+
 function validateRunOptions({
   prompt,
   launch,
@@ -392,15 +399,10 @@ function launchReviewerChild(
         finish(undefined, Buffer.concat(stdout).toString('utf8'));
         return;
       }
-      const diagnostic = Buffer.concat(stderr).toString('utf8').trim();
       const reason = finalCode === null || finalCode === undefined
         ? `signal ${finalSignal ?? 'unknown'}`
         : `code ${finalCode}`;
-      finish(new Error(
-        diagnostic.length > 0
-          ? `${provider} exited with ${reason}: ${diagnostic}`
-          : `${provider} exited with ${reason}`,
-      ));
+      finish(new ReviewerChildExitError(provider, reason));
     };
 
     try {

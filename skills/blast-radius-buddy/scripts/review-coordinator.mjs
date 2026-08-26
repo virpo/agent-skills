@@ -106,6 +106,7 @@ function validateDependencies(options) {
   for (const [label, value] of [
     ['state.acquire', state?.acquire],
     ['state.heartbeat', state?.heartbeat],
+    ['state.assertOwned', state?.assertOwned],
     ['state.failure', state?.failure],
     ['state.success', state?.success],
     ['state.release', state?.release],
@@ -115,6 +116,7 @@ function validateDependencies(options) {
     ['marker.stale', marker?.stale],
     ['marker.complete', marker?.complete],
     ['github.capture', github?.capture],
+    ['github.assertIdentity', github?.assertIdentity],
     ['github.recheck', github?.recheck],
     ['github.submit', github?.submit],
     ['workspace.create', workspace?.create],
@@ -224,12 +226,20 @@ export async function runTrigger(options) {
       }
     }
   })();
+  const authorizeWrite = async ({ honorAbort = true } = {}) => {
+    if (honorAbort && controller.signal.aborted) throw controller.signal.reason;
+    await state.assertOwned(lease);
+    if (honorAbort && controller.signal.aborted) throw controller.signal.reason;
+    await github.assertIdentity();
+    if (honorAbort && controller.signal.aborted) throw controller.signal.reason;
+  };
 
   try {
     const context = await github.capture(trigger);
     const captured = validateContext(context, trigger);
     if (captured.stale) {
       if (!options.dryRun && !quietUntilComplete) {
+        await authorizeWrite();
         await marker.stale({ trigger, context, actualHeadSha: captured.actualHeadSha });
       }
       return { status: 'stale', actualHeadSha: captured.actualHeadSha };
@@ -240,6 +250,7 @@ export async function runTrigger(options) {
     }
 
     if (!quietUntilComplete) {
+      await authorizeWrite();
       await marker.working({ trigger, context });
       markerStarted = true;
     }
@@ -351,6 +362,7 @@ export async function runTrigger(options) {
     const current = await github.recheck({ trigger, context, synthesis });
     if (current?.headSha !== trigger.headSha) {
       if (!quietUntilComplete) {
+        await authorizeWrite();
         await marker.stale({ trigger, context, actualHeadSha: current?.headSha });
       }
       return { status: 'stale', actualHeadSha: current?.headSha };
@@ -371,7 +383,9 @@ export async function runTrigger(options) {
       throw new Error('Codex event contradicts deterministic host gates');
     }
     const gatedSynthesis = { ...synthesis, gates: hostGates };
+    await authorizeWrite();
     const submission = await github.submit({ trigger, context, synthesis: gatedSynthesis });
+    await authorizeWrite();
     await marker.complete({ trigger, context, synthesis: gatedSynthesis, submission });
     await state.success(trigger);
     log(logger, {
@@ -388,12 +402,22 @@ export async function runTrigger(options) {
     const failure = await state.failure(trigger, category, error);
     const reason = error instanceof Error ? error.message : String(error);
     if (markerStarted) {
-      await marker.retry({
-        trigger,
-        reason,
-        category,
-        nextEligibleAt: failure.nextEligibleAt,
-      });
+      try {
+        await authorizeWrite({ honorAbort: false });
+        await marker.retry({
+          trigger,
+          reason,
+          category,
+          nextEligibleAt: failure.nextEligibleAt,
+        });
+      } catch (markerError) {
+        log(logger, {
+          event: 'marker-write-suppressed',
+          pr: trigger.number,
+          triggerId: trigger.triggerId,
+          reason: markerError instanceof Error ? markerError.message : String(markerError),
+        });
+      }
     }
     log(logger, {
       event: 'retry-scheduled',
@@ -428,6 +452,20 @@ export async function runQueue({ triggers, run }) {
 
 function stdoutOf(result) {
   return typeof result === 'string' ? result : result?.stdout;
+}
+
+export async function assertGithubIdentity({ execute, expectedReviewer }) {
+  requireFunction(execute, 'execute');
+  if (typeof expectedReviewer !== 'string' || expectedReviewer.trim().length === 0) {
+    throw new TypeError('expectedReviewer must be a non-empty string');
+  }
+  const login = stdoutOf(await execute('gh', ['api', 'user', '--jq', '.login']))?.trim();
+  if (login !== expectedReviewer) {
+    throw new Error(
+      `Active GitHub account ${login || '(unknown)'} does not match reviewer ${expectedReviewer}`,
+    );
+  }
+  return login;
 }
 
 function parseJsonResult(result, label) {
@@ -476,6 +514,12 @@ function createStateAdapter({ stateDir, now = () => Date.now() }) {
       ownerId: lease.ownerId,
       now: now(),
     }),
+    assertOwned: (lease) => heartbeatLease({
+      stateDir,
+      triggerKey: lease.triggerKey,
+      ownerId: lease.ownerId,
+      now: now(),
+    }),
     failure: (trigger, category) => recordFailure({
       stateDir,
       triggerKey: triggerStateKey(trigger),
@@ -516,13 +560,16 @@ function reportSummary(report) {
     : `${count} consequential issues need another pass; details are in the review.`;
 }
 
-function createMarkerAdapter({ execute }) {
-  const update = (trigger, body) => writeMarker({
-    repo: trigger.repo,
-    number: trigger.number,
-    body,
-    execute,
-  });
+function createMarkerAdapter({ execute, expectedReviewer }) {
+  const update = async (trigger, body) => {
+    await assertGithubIdentity({ execute, expectedReviewer });
+    return writeMarker({
+      repo: trigger.repo,
+      number: trigger.number,
+      body,
+      execute,
+    });
+  };
   return {
     working: ({ trigger }) => update(trigger, buildProgressBody({
       headSha: trigger.headSha,
@@ -560,7 +607,7 @@ function serializeChangedLines(diff) {
   ));
 }
 
-async function captureContext(trigger, { execute }) {
+export async function captureContext(trigger, { execute }) {
   const metadata = parseJsonResult(await execute('gh', [
     'pr', 'view', String(trigger.number), '--repo', trigger.repo,
     '--json', 'number,url,title,body,author,baseRefOid,headRefOid,files',
@@ -570,6 +617,12 @@ async function captureContext(trigger, { execute }) {
   ]));
   if (typeof diff !== 'string' || diff.length === 0) {
     throw new Error('Pull request diff is empty');
+  }
+  const capturedHead = parseJsonResult(await execute('gh', [
+    'pr', 'view', String(trigger.number), '--repo', trigger.repo, '--json', 'headRefOid',
+  ]), `captured head for PR #${trigger.number}`).headRefOid;
+  if (capturedHead !== metadata.headRefOid) {
+    return { ...trigger, headSha: capturedHead };
   }
   const headSha = metadata.headRefOid;
   const authorLogin = metadata.author?.login;
@@ -811,8 +864,9 @@ function createWorkspaceAdapter({ repository, execute }) {
   };
 }
 
-function createGithubAdapter({ execute, repository }) {
+function createGithubAdapter({ execute, repository, expectedReviewer }) {
   return {
+    assertIdentity: () => assertGithubIdentity({ execute, expectedReviewer }),
     capture: (trigger) => captureContext(trigger, { execute, repository }),
     recheck: async ({ trigger }) => {
       const metadata = parseJsonResult(await execute('gh', [
@@ -832,6 +886,7 @@ function createGithubAdapter({ execute, repository }) {
       };
     },
     submit: async ({ trigger, context, synthesis }) => {
+      await assertGithubIdentity({ execute, expectedReviewer });
       const prepared = prepareReview(
         synthesis.report,
         context.diff,
@@ -860,7 +915,7 @@ function usage() {
   return [
     'Usage:',
     '  review-coordinator.mjs run --repo OWNER/REPO --author LOGIN --reviewer LOGIN --repository ABSOLUTE_PATH --state-dir ABSOLUTE_PATH --claude-model MODEL --codex-model MODEL [--dry-run] [--quiet-until-complete]',
-    '  review-coordinator.mjs run --repo OWNER/REPO --pr NUMBER --repository ABSOLUTE_PATH --state-dir ABSOLUTE_PATH --claude-model opus --codex-model MODEL [--dry-run] [--quiet-until-complete]',
+    '  review-coordinator.mjs run --repo OWNER/REPO --pr NUMBER --reviewer LOGIN --repository ABSOLUTE_PATH --state-dir ABSOLUTE_PATH --claude-model opus --codex-model MODEL [--dry-run] [--quiet-until-complete]',
   ].join('\n');
 }
 
@@ -920,7 +975,7 @@ export async function main(args, dependencies = {}) {
   const repo = requiredOption(options, 'repo');
   const pr = explicitPullRequest(options);
   const author = pr === undefined ? requiredOption(options, 'author') : undefined;
-  const reviewer = pr === undefined ? requiredOption(options, 'reviewer') : undefined;
+  const reviewer = requiredOption(options, 'reviewer');
   const repository = requiredOption(options, 'repository');
   const stateDir = requiredOption(options, 'state-dir');
   if (!isAbsolute(repository) || !isAbsolute(stateDir)) {
@@ -938,8 +993,12 @@ export async function main(args, dependencies = {}) {
   const reviewers = dependencies.reviewers ?? await createReviewerAdapter({ logger });
   const shared = {
     state: dependencies.state ?? createStateAdapter({ stateDir }),
-    marker: dependencies.marker ?? createMarkerAdapter({ execute }),
-    github: dependencies.github ?? createGithubAdapter({ execute, repository }),
+    marker: dependencies.marker ?? createMarkerAdapter({ execute, expectedReviewer: reviewer }),
+    github: dependencies.github ?? createGithubAdapter({
+      execute,
+      repository,
+      expectedReviewer: reviewer,
+    }),
     workspace: dependencies.workspace ?? createWorkspaceAdapter({ repository, execute }),
     reviewers,
     claudeModel,

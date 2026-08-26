@@ -15,6 +15,7 @@ import {
   launchClaude,
   launchCodex,
   main,
+  ReviewerChildExitError,
   runReviewer,
 } from '../skills/blast-radius-buddy/scripts/reviewer-runner.mjs';
 import { parseProtocolBlock } from '../skills/blast-radius-buddy/scripts/review-protocol.mjs';
@@ -1024,9 +1025,15 @@ test('launchCodex labels output-cap and child-exit failures', async () => {
   await assert.rejects(
     launchCodex(
       { cwd: '/neutral/reviewer', input: 'packet', signal: new AbortController().signal },
-      { model: 'gpt-5.6-sol', spawnImpl: () => fakeChild({ stderr: 'bad auth', code: 1 }) },
+      {
+        model: 'gpt-5.6-sol',
+        spawnImpl: () => fakeChild({ stderr: 'SECRET bad auth', code: 1 }),
+      },
     ),
-    /Codex exited with code 1: bad auth/,
+    (error) => error instanceof ReviewerChildExitError
+      && error.message === 'Codex exited with code 1'
+      && !Object.hasOwn(error, 'diagnostic')
+      && !error.message.includes('SECRET'),
   );
 });
 

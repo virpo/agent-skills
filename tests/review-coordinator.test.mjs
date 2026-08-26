@@ -4,7 +4,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import {
   ANGLE_SLUGS,
+  assertGithubIdentity,
   bindSynthesisHostGates,
+  captureContext,
   main,
   runQueue,
   runTrigger,
@@ -93,6 +95,7 @@ function harness(overrides = {}) {
       deadlineAt: Date.now() + 30_000,
     }),
     heartbeat: async () => events.push('state:heartbeat'),
+    assertOwned: async () => events.push('state:assert-owned'),
     failure: async (_trigger, category) => {
       events.push(`state:failure:${category}`);
       return { nextEligibleAt: 1_900_000_000_000 };
@@ -108,6 +111,7 @@ function harness(overrides = {}) {
     complete: async ({ trigger }) => events.push(`marker:complete:${trigger.triggerId}`),
   };
   const github = {
+    assertIdentity: async () => events.push('github:assert-identity'),
     capture: async () => context,
     recheck: async () => ({ headSha: HEAD, requiredChecksPass: true }),
     submit: async ({ trigger }) => {
@@ -186,12 +190,12 @@ test('Codex assesses scope before two Codex and one Opus angle start in parallel
   const resultPromise = runTrigger(options);
   await delay(0);
   assert.deepEqual(events.filter((event) => typeof event === 'string').slice(0, 6), [
+    'state:assert-owned',
+    'github:assert-identity',
     'marker:working',
     'workspace:create',
     'codex:assess',
     'codex:security-and-abuse',
-    'claude:system-blast-radius',
-    'codex:feature-truth-and-adjacent-regressions',
   ]);
   assert.equal(events.includes('codex:synthesis'), false);
   for (const review of reviews.values()) {
@@ -375,6 +379,40 @@ test('stale heads and required-check regressions perform no native review write'
   }
 });
 
+test('lease ownership is revalidated immediately before the native review write', async () => {
+  const { events, options } = harness({ quietUntilComplete: true });
+  let ownershipChecks = 0;
+  options.state.assertOwned = async () => {
+    ownershipChecks += 1;
+    events.push('state:assert-owned');
+    throw new Error('Lease owner mismatch');
+  };
+  options.github.submit = async () => assert.fail('expired lease must not submit');
+
+  const result = await runTrigger(options);
+
+  assert.equal(result.status, 'retry-scheduled');
+  assert.equal(ownershipChecks, 1);
+  assert.equal(events.some((event) => String(event).startsWith('marker:')), false);
+  assert.equal(events.some((event) => String(event).startsWith('github:submit:')), false);
+});
+
+test('wrong GitHub identity blocks every quiet-mode publication', async () => {
+  const { events, options } = harness({ quietUntilComplete: true });
+  options.github.assertIdentity = async () => {
+    events.push('github:assert-identity');
+    throw new Error('Active GitHub account wrong-account does not match reviewer reviewer');
+  };
+  options.github.submit = async () => assert.fail('wrong account must not submit');
+
+  const result = await runTrigger(options);
+
+  assert.equal(result.status, 'retry-scheduled');
+  assert.match(result.reason, /wrong-account.*reviewer/);
+  assert.equal(events.some((event) => String(event).startsWith('marker:')), false);
+  assert.equal(events.some((event) => String(event).startsWith('github:submit:')), false);
+});
+
 test('dry-run captures eligibility but performs no marker or reviewer write', async () => {
   const { events, options } = harness({ dryRun: true });
   options.reviewers.assess = async () => assert.fail('reviewer must not start');
@@ -441,11 +479,54 @@ test('quiet-until-complete publishes the native review before its only final mar
 
   assert.equal(result.status, 'complete');
   const writes = events.filter((event) => typeof event === 'string'
-    && (event.startsWith('marker:') || event.startsWith('github:')));
+    && (event.startsWith('marker:') || event.startsWith('github:submit:')));
   assert.deepEqual(writes, [
     `github:submit:${TRIGGER.triggerId}`,
     `marker:complete:${TRIGGER.triggerId}`,
   ]);
+});
+
+test('GitHub identity check uses the authenticated login and rejects mismatches', async () => {
+  const calls = [];
+  const execute = async (command, args) => {
+    calls.push({ command, args });
+    return { stdout: 'reviewer\n', stderr: '' };
+  };
+
+  assert.equal(await assertGithubIdentity({ execute, expectedReviewer: 'reviewer' }), 'reviewer');
+  await assert.rejects(
+    assertGithubIdentity({
+      execute: async () => ({ stdout: 'other-account\n', stderr: '' }),
+      expectedReviewer: 'reviewer',
+    }),
+    /other-account.*reviewer/,
+  );
+  assert.deepEqual(calls, [{ command: 'gh', args: ['api', 'user', '--jq', '.login'] }]);
+});
+
+test('capture rejects a diff when the PR head changes during capture', async () => {
+  const changedHead = 'f'.repeat(40);
+  const calls = [];
+  const execute = async (command, args) => {
+    calls.push({ command, args });
+    if (calls.length === 1) {
+      return { stdout: JSON.stringify({
+        number: TRIGGER.number,
+        title: 'Change behavior',
+        author: { login: 'author' },
+        baseRefOid: 'a'.repeat(40),
+        headRefOid: HEAD,
+        files: [{ path: 'src/a.ts' }],
+      }) };
+    }
+    if (calls.length === 2) return { stdout: 'diff --git a/src/a.ts b/src/a.ts\n' };
+    return { stdout: JSON.stringify({ headRefOid: changedHead }) };
+  };
+
+  const context = await captureContext(TRIGGER, { execute });
+
+  assert.equal(context.headSha, changedHead);
+  assert.equal(calls.length, 3);
 });
 
 test('runQueue processes pull requests sequentially', async () => {
@@ -507,6 +588,7 @@ test('coordinator CLI can target one explicit draft PR at its exact head', async
     'run',
     '--repo', 'sli-do/slido-frontend',
     '--pr', '17912',
+    '--reviewer', 'virpo',
     '--repository', '/absolute/repository',
     '--state-dir', '/absolute/state',
     '--claude-model', 'opus',
