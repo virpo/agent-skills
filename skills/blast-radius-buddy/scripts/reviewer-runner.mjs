@@ -543,7 +543,7 @@ export function buildCodexSandboxProfile({
   ].join('\n');
 }
 
-async function prepareCodexSandbox({ cwd }) {
+async function prepareCodexSandbox({ cwd, jsonSchema }) {
   const hostHome = process.env.HOME;
   if (typeof hostHome !== 'string' || !isAbsolute(hostHome)) {
     throw new Error('Codex review requires an absolute host HOME');
@@ -598,6 +598,16 @@ async function prepareCodexSandbox({ cwd }) {
       certificates.join('\n'),
       { encoding: 'utf8', mode: 0o600 },
     );
+    const schemaPath = jsonSchema === undefined
+      ? undefined
+      : join(runtimeRoot, 'output-schema.json');
+    if (schemaPath !== undefined) {
+      await writeFileDefault(
+        schemaPath,
+        JSON.stringify(jsonSchema),
+        { encoding: 'utf8', mode: 0o600 },
+      );
+    }
     const profile = buildCodexSandboxProfile({
       hostHome: await realpath(hostHome),
       hostTemp: await realpath(tmpdir()),
@@ -623,6 +633,7 @@ async function prepareCodexSandbox({ cwd }) {
     return {
       command: '/usr/bin/sandbox-exec',
       prefixArgs: ['-f', profilePath, codexNativePath],
+      schemaPath,
       environmentOverrides: {
         HOME: runtimeRoot,
         CODEX_HOME: runtimeRoot,
@@ -651,6 +662,7 @@ export async function launchCodex(
   {
     model,
     repositoryAccess = false,
+    jsonSchema,
     prepareSandbox = prepareCodexSandbox,
     ...dependencies
   } = {},
@@ -661,14 +673,29 @@ export async function launchCodex(
   if (typeof repositoryAccess !== 'boolean') {
     throw new TypeError('repositoryAccess must be a boolean');
   }
+  if (jsonSchema !== undefined
+    && (jsonSchema === null || typeof jsonSchema !== 'object' || Array.isArray(jsonSchema))) {
+    throw new TypeError('Codex JSON schema must be an object');
+  }
+  if (jsonSchema !== undefined && !repositoryAccess) {
+    throw new TypeError('Codex JSON schema requires repositoryAccess');
+  }
+  const sandbox = repositoryAccess
+    ? await prepareSandbox({ cwd: options.cwd, jsonSchema })
+    : undefined;
+  if (jsonSchema !== undefined
+    && (typeof sandbox?.schemaPath !== 'string' || !isAbsolute(sandbox.schemaPath))) {
+    await sandbox?.cleanup();
+    throw new Error('Codex sandbox did not provide an output schema path');
+  }
   const args = [
     'exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only',
     '--ignore-rules', '--skip-git-repo-check', '--model', model,
     '-c', 'shell_environment_policy.inherit=none',
+    ...(sandbox?.schemaPath === undefined ? [] : ['--output-schema', sandbox.schemaPath]),
     ...(repositoryAccess ? ['-C', options.cwd] : []),
     '-',
   ];
-  const sandbox = repositoryAccess ? await prepareSandbox({ cwd: options.cwd }) : undefined;
   let error;
   try {
     return await launchReviewerChild(options, {

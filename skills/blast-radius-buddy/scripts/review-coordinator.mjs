@@ -59,6 +59,13 @@ export const ANGLE_SLUGS = Object.freeze([
   'system-blast-radius',
   'feature-truth-and-adjacent-regressions',
 ]);
+const CODEX_PLAN_OUTPUT_SCHEMA = Object.freeze({
+  type: 'object',
+  properties: {
+    status: { type: 'string', enum: ['complete', 'needs-context'] },
+  },
+  required: ['status'],
+});
 
 class WholeRunDeadlineError extends Error {
   constructor() {
@@ -164,6 +171,14 @@ function validateSynthesisIdentity(synthesis, trigger) {
   }
   if (synthesis.triggerId !== trigger.triggerId) {
     throw new Error('Codex synthesis trigger does not match the queued trigger');
+  }
+}
+
+function parseStructuredModelJson(output, label) {
+  try {
+    return JSON.parse(output);
+  } catch {
+    throw new Error(`Invalid JSON in structured ${label} output`);
   }
 }
 
@@ -734,7 +749,7 @@ function assessmentPrompt({ context, workspace }) {
     'Return a disposition for every changed file. Group material files into risk clusters with relevant callers, contracts, configuration, and tests. Generated, vendored, lockfile, fixture, and mechanical churn may be grouped but never omitted.',
     'Use sequential cluster IDs cluster-1, cluster-2, and so on. File disposition is exactly material, mechanical, or low-risk. Cluster risk is exactly low, medium, or high. Every material file names its cluster ID.',
     'Assign all three canonical angles exactly once: security-and-abuse, system-blast-radius, and feature-truth-and-adjacent-regressions. Assign exactly one highest-risk angle to provider claude and the other two to provider codex.',
-    'Return only one JSON object in one fenced brb-plan block. A complete result uses exactly status, headSha, triggerId, intent, boundaries, clusters, fileDispositions, assignments, and missingContext. Each cluster uses exactly id, risk, reason, changedFiles, relatedFiles, and tests. Each file disposition uses exactly path, disposition, clusterId, and reason. Each assignment uses exactly angle, provider, and reason. Complete results use an empty missingContext array.',
+    'Return only the required brb-plan JSON object as raw JSON with no Markdown fence or prose. A complete result uses exactly status, headSha, triggerId, intent, boundaries, clusters, fileDispositions, assignments, and missingContext. Each cluster uses exactly id, risk, reason, changedFiles, relatedFiles, and tests. Each file disposition uses exactly path, disposition, clusterId, and reason. Each assignment uses exactly angle, provider, and reason. Complete results use an empty missingContext array.',
     'For exact missing repository state use only status, headSha, triggerId, and a non-empty missingContext array. Do not edit, comment, approve, request changes, resolve, push, merge, or infer authorization.',
   ].join('\n\n');
 }
@@ -819,8 +834,12 @@ async function createReviewerAdapter({ logger } = {}) {
   return {
     assess: ({ context, workspace, model, signal, stageDeadlineAt }) => runReviewer({
       prompt: assessmentPrompt({ context, workspace }),
-      launch: (options) => launchCodex(options, { model, repositoryAccess: true }),
-      validate: (output) => validateReviewPlan(parseProtocolBlock(output, 'brb-plan'), {
+      launch: (options) => launchCodex(options, {
+        model,
+        repositoryAccess: true,
+        jsonSchema: CODEX_PLAN_OUTPUT_SCHEMA,
+      }),
+      validate: (output) => validateReviewPlan(parseStructuredModelJson(output, 'brb-plan'), {
         headSha: context.headSha,
         triggerId: context.triggerId,
         changedFiles: context.files.map((file) => typeof file === 'string' ? file : file.path),

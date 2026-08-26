@@ -262,7 +262,7 @@ test('long model stages heartbeat the fixed lease until completion', async () =>
   options.reviewers.reviewClaude = ({ angle }) => reviews.get(angle).promise;
 
   const resultPromise = runTrigger(options);
-  await delay(18);
+  await delay(30);
   const heartbeatsDuringReview = events.filter((event) => event === 'state:heartbeat').length;
   for (const review of reviews.values()) {
     review.resolve({ status: 'complete', findings: [], suggestions: [] });

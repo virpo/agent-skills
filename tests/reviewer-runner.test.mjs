@@ -945,6 +945,11 @@ test('launchCodex uses fixed isolated arguments, minimal environment, and stdin 
 test('launchCodex repository mode roots the read-only sandbox at the neutral workspace', async () => {
   const calls = [];
   let cleaned = 0;
+  const jsonSchema = {
+    type: 'object',
+    properties: { status: { enum: ['complete', 'needs-context'] } },
+    required: ['status'],
+  };
   const output = await launchCodex(
     {
       cwd: '/exact/review-workspace',
@@ -954,16 +959,21 @@ test('launchCodex repository mode roots the read-only sandbox at the neutral wor
     {
       model: 'gpt-5.6-sol',
       repositoryAccess: true,
-      prepareSandbox: async () => ({
+      jsonSchema,
+      prepareSandbox: async (options) => {
+        assert.deepEqual(options, { cwd: '/exact/review-workspace', jsonSchema });
+        return {
         command: '/usr/bin/sandbox-exec',
         prefixArgs: ['-f', '/private/profile.sb', 'codex'],
+        schemaPath: '/private/runtime/output-schema.json',
         environmentOverrides: {
           HOME: '/private/runtime',
           CODEX_HOME: '/private/runtime',
           TMPDIR: '/private/runtime/tmp',
         },
         cleanup: async () => { cleaned += 1; },
-      }),
+        };
+      },
       spawnImpl: (command, args, options) => {
         calls.push({ command, args, options });
         return fakeChild({ stdout: 'complete' });
@@ -978,6 +988,7 @@ test('launchCodex repository mode roots the read-only sandbox at the neutral wor
     'exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only',
     '--ignore-rules', '--skip-git-repo-check', '--model', 'gpt-5.6-sol',
     '-c', 'shell_environment_policy.inherit=none',
+    '--output-schema', '/private/runtime/output-schema.json',
     '-C', '/exact/review-workspace', '-',
   ]);
   assert.equal(calls[0].options.cwd, '/exact/review-workspace');
