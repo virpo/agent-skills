@@ -211,14 +211,19 @@ test('upsertReviewComment updates the authenticated user legacy marker comment',
     { id: 42 },
   ]);
 
+  let authorizedAfterReads = false;
   const result = await upsertReviewComment({
     repo: 'acme/widget',
     pr: 19,
     bodyFile: './review.md',
     execute,
+    authorizeWrite: async () => {
+      authorizedAfterReads = calls.length === 2;
+    },
   });
 
   assert.deepEqual(result, { action: 'updated', commentId: 42 });
+  assert.equal(authorizedAfterReads, true);
   assert.deepEqual(calls, [
     { command: 'gh', args: ['api', 'user'] },
     {

@@ -170,8 +170,12 @@ export function buildCompletionBody({ headSha, reviewUrl }) {
   ].join('\n');
 }
 
-async function defaultExecute(command, args) {
-  return execFileAsync(command, args, { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });
+async function defaultExecute(command, args, { signal } = {}) {
+  return execFileAsync(command, args, {
+    encoding: 'utf8',
+    maxBuffer: 10 * 1024 * 1024,
+    signal,
+  });
 }
 
 function parseJson(result, label) {
@@ -184,7 +188,7 @@ function parseJson(result, label) {
   }
 }
 
-function validateInputs({ repo, pr, bodyFile, execute }) {
+function validateInputs({ repo, pr, bodyFile, execute, authorizeWrite, signal }) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
     throw new TypeError('repo must use OWNER/REPO format');
   }
@@ -200,6 +204,15 @@ function validateInputs({ repo, pr, bodyFile, execute }) {
   if (typeof execute !== 'function') {
     throw new TypeError('execute must be a function');
   }
+  if (typeof authorizeWrite !== 'function') {
+    throw new TypeError('authorizeWrite must be a function');
+  }
+  if (signal !== undefined
+    && (typeof signal !== 'object'
+      || typeof signal.aborted !== 'boolean'
+      || typeof signal.addEventListener !== 'function')) {
+    throw new TypeError('signal must be an AbortSignal');
+  }
 }
 
 export async function upsertReviewComment({
@@ -207,8 +220,10 @@ export async function upsertReviewComment({
   pr,
   bodyFile,
   execute = defaultExecute,
+  authorizeWrite = async () => {},
+  signal,
 }) {
-  validateInputs({ repo, pr, bodyFile, execute });
+  validateInputs({ repo, pr, bodyFile, execute, authorizeWrite, signal });
 
   const viewer = parseJson(await execute('gh', ['api', 'user']), 'authenticated user');
   if (typeof viewer?.login !== 'string' || viewer.login.length === 0) {
@@ -241,7 +256,12 @@ export async function upsertReviewComment({
         `body=@${bodyFile}`,
       ];
 
-  const written = parseJson(await execute('gh', writeArgs), 'written review comment');
+  await authorizeWrite();
+  if (signal?.aborted) throw signal.reason;
+  const written = parseJson(
+    await execute('gh', writeArgs, { signal }),
+    'written review comment',
+  );
   return {
     action: existing ? 'updated' : 'created',
     commentId: written.id,

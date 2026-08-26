@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import {
   chmod,
   copyFile,
@@ -14,6 +14,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 import {
   parseProtocolBlock,
@@ -39,6 +40,7 @@ const minimalEnvironment = (keys) => Object.fromEntries(
     (key) => process.env[key] === undefined ? [] : [[key, process.env[key]]],
   ),
 );
+const execFileAsync = promisify(execFile);
 
 export const CLAUDE_REVIEW_ARGS = Object.freeze([
   '--safe-mode', '--tools', '', '--disable-slash-commands',
@@ -498,7 +500,40 @@ export function buildCodexSandboxProfile({
   }
   return [
     '(version 1)',
-    '(allow default)',
+    '(deny default)',
+    '(allow process*)',
+    '(allow network-outbound)',
+    '(allow system-socket)',
+    '(allow sysctl-read)',
+    '(allow file-read-metadata)',
+    '(allow file-read-data',
+    '  (literal "/")',
+    '  (subpath "/bin")',
+    '  (subpath "/usr/bin")',
+    '  (subpath "/usr/lib")',
+    '  (subpath "/usr/share")',
+    '  (subpath "/System/Library")',
+    '  (subpath "/System/Cryptexes/App/usr")',
+    '  (subpath "/Library/Apple/System/Library")',
+    '  (subpath "/private/etc/ssl")',
+    '  (subpath "/etc/ssl")',
+    '  (literal "/etc/resolv.conf")',
+    '  (literal "/private/etc/resolv.conf")',
+    '  (literal "/var/run/resolv.conf")',
+    '  (literal "/private/var/run/resolv.conf")',
+    '  (subpath "/private/var/db/timezone")',
+    '  (literal "/dev/null")',
+    '  (literal "/dev/random")',
+    '  (literal "/dev/urandom")',
+    `  (subpath ${schemeString(nodeRuntimeRoot)})`,
+    `  (subpath ${schemeString(runtimeRoot)})`,
+    `  (subpath ${schemeString(workspaceRoot)}))`,
+    `(allow file-write* (subpath ${schemeString(runtimeRoot)}))`,
+    '(allow file-write-data (literal "/dev/null"))',
+    '(deny mach-lookup (global-name "com.apple.SecurityServer"))',
+    '(deny mach-lookup (global-name "com.apple.securityd"))',
+    '(deny mach-lookup (global-name "com.apple.securityd.xpc"))',
+    '(deny appleevent-send)',
     `(deny file-read-data (subpath ${schemeString(hostHome)}))`,
     `(deny file-read-data (subpath ${schemeString(hostTemp)}))`,
     `(allow file-read-data (subpath ${schemeString(nodeRuntimeRoot)}))`,
@@ -528,6 +563,41 @@ async function prepareCodexSandbox({ cwd }) {
     } catch (error) {
       if (process.env.OPENAI_API_KEY === undefined) throw error;
     }
+    for (const name of [
+      'cloud-config-bundle-cache.json',
+      'cloud-requirements-cache.json',
+      'installation_id',
+    ]) {
+      try {
+        const target = join(runtimeRoot, name);
+        await copyFile(join(sourceHome, name), target);
+        await chmod(target, 0o600);
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+      }
+    }
+    const trustBundlePath = join(runtimeRoot, 'ca-certificates.pem');
+    const certificateKeychains = [
+      { path: '/System/Library/Keychains/SystemRootCertificates.keychain', required: true },
+      { path: '/Library/Keychains/System.keychain', required: true },
+      { path: join(hostHome, 'Library', 'Keychains', 'login.keychain-db'), required: false },
+    ];
+    const certificates = await Promise.all(certificateKeychains.map(async (keychain) => {
+      try {
+        const result = await execFileAsync('/usr/bin/security', [
+          'find-certificate', '-a', '-p', keychain.path,
+        ], { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });
+        return result.stdout;
+      } catch (error) {
+        if (keychain.required) throw error;
+        return '';
+      }
+    }));
+    await writeFileDefault(
+      trustBundlePath,
+      certificates.join('\n'),
+      { encoding: 'utf8', mode: 0o600 },
+    );
     const profile = buildCodexSandboxProfile({
       hostHome: await realpath(hostHome),
       hostTemp: await realpath(tmpdir()),
@@ -535,14 +605,30 @@ async function prepareCodexSandbox({ cwd }) {
       nodeRuntimeRoot: await realpath(resolve(dirname(process.execPath), '..')),
       workspaceRoot: await realpath(cwd),
     });
+    const codexTarget = process.arch === 'arm64'
+      ? 'aarch64-apple-darwin'
+      : 'x86_64-apple-darwin';
+    const codexPackageRoot = resolve(dirname(await realpath(join(dirname(process.execPath), 'codex'))), '..');
+    const codexNativePath = await realpath(join(
+      codexPackageRoot,
+      'node_modules',
+      '@openai',
+      `codex-darwin-${process.arch}`,
+      'vendor',
+      codexTarget,
+      'bin',
+      'codex',
+    ));
     await writeFileDefault(profilePath, profile, { encoding: 'utf8', mode: 0o600 });
     return {
       command: '/usr/bin/sandbox-exec',
-      prefixArgs: ['-f', profilePath, 'codex'],
+      prefixArgs: ['-f', profilePath, codexNativePath],
       environmentOverrides: {
         HOME: runtimeRoot,
         CODEX_HOME: runtimeRoot,
         TMPDIR: runtimeTemp,
+        SSL_CERT_FILE: trustBundlePath,
+        CODEX_CA_CERTIFICATE: trustBundlePath,
       },
       cleanup: async () => {
         await Promise.all([

@@ -160,6 +160,18 @@ test('parseProtocolBlock accepts exactly one matching fenced JSON block', () => 
   }
 });
 
+test('parseProtocolBlock never includes malformed model output in its error', () => {
+  const secret = 'SECRET_MODEL_PACKET_9381';
+  assert.throws(
+    () => parseProtocolBlock(
+      `\`\`\`brb-review\n{"status":"${secret}" BROKEN}\n\`\`\``,
+      'brb-review',
+    ),
+    (error) => error.message === 'Invalid JSON in brb-review block'
+      && !error.message.includes(secret),
+  );
+});
+
 test('validateReviewPlan accepts complete exact-head coverage and needs-context', () => {
   assert.deepEqual(validateReviewPlan(REVIEW_PLAN, {
     headSha: HEAD,

@@ -368,8 +368,8 @@ export function parseProtocolBlock(text, label) {
 
   try {
     return JSON.parse(match[1]);
-  } catch (error) {
-    throw new Error(`Invalid JSON in ${label} block: ${error.message}`);
+  } catch {
+    throw new Error(`Invalid JSON in ${label} block`);
   }
 }
 

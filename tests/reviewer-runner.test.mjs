@@ -988,7 +988,7 @@ test('launchCodex repository mode roots the read-only sandbox at the neutral wor
   assert.equal(cleaned, 1);
 });
 
-test('Codex sandbox profile denies host home and temp reads except explicit roots', () => {
+test('Codex sandbox profile allowlists only runtime and review data roots', () => {
   const profile = buildCodexSandboxProfile({
     hostHome: '/Users/reviewer',
     hostTemp: '/private/var/tmp',
@@ -997,11 +997,15 @@ test('Codex sandbox profile denies host home and temp reads except explicit root
     workspaceRoot: '/private/var/tmp/review-workspace',
   });
 
-  assert.match(profile, /deny file-read-data.*\/Users\/reviewer/s);
-  assert.match(profile, /deny file-read-data.*\/private\/var\/tmp/s);
+  assert.match(profile, /\(deny default\)/);
+  assert.doesNotMatch(profile, /\(allow default\)/);
+  assert.doesNotMatch(profile, /allow file-read-data.*\/Users\/reviewer[)\s]/);
+  assert.doesNotMatch(profile, /allow file-read-data.*\/private\/var\/tmp[)\s]/);
   assert.match(profile, /allow file-read-data.*runtime-secret/s);
   assert.match(profile, /allow file-read-data.*review-workspace/s);
   assert.match(profile, /allow file-read-data.*\.nvm\/versions\/node\/v24/s);
+  assert.match(profile, /deny mach-lookup.*com\.apple\.SecurityServer/s);
+  assert.match(profile, /deny appleevent-send/s);
 });
 
 test('launchCodex labels output-cap and child-exit failures', async () => {

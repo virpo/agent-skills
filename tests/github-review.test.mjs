@@ -1214,10 +1214,11 @@ test('submitReview re-prepares source artifacts then checks the exact head immed
     body: prepared.body,
     comments: prepared.comments,
     execute,
+    authorizeWrite: async () => operations.push('authorize-write'),
   });
 
   assert.deepEqual(result, { reviewId: 9, reviewUrl: REVIEW_URL });
-  assert.deepEqual(operations, ['check-head', 'post-review']);
+  assert.deepEqual(operations, ['check-head', 'authorize-write', 'post-review']);
   assert.equal(payload.event, 'COMMENT');
   assert.equal(payload.commit_id, HEAD_SHA);
 });

@@ -51,16 +51,17 @@ const PRIOR_FEEDBACK_FIELDS = ['id', 'status', 'summary', 'path', 'line'];
 const COVERAGE_FIELDS = ['security', 'blastRadius', 'featureTruth'];
 const SUBMISSION_FIELDS = [
   'repo', 'number', 'triggerId', 'report', 'diff', 'gates', 'verification',
-  'body', 'comments', 'execute',
+  'body', 'comments', 'execute', 'authorizeWrite', 'signal',
 ];
 const VERIFICATION_ARTIFACT_FIELDS = ['result', 'suggestions', 'promotions'];
 const PROMOTION_FIELDS = ['suggestionId', 'finding'];
 const HEAD_TRIGGER_PATTERN = /^head:([0-9a-f]{40})$/i;
 const REQUEST_TRIGGER_PATTERN = /^review-requested:([1-9]\d*)$/;
 
-const defaultExecute = (command, args) => execFileAsync(command, args, {
+const defaultExecute = (command, args, { signal } = {}) => execFileAsync(command, args, {
   encoding: 'utf8',
   maxBuffer: 10 * 1024 * 1024,
+  signal,
 });
 
 function plainObject(value) {
@@ -1027,6 +1028,8 @@ function validateSubmission(options) {
     body,
     comments,
     execute,
+    authorizeWrite = async () => {},
+    signal,
   } = options;
   if (typeof repo !== 'string' || !REPO_PATTERN.test(repo)) {
     throw new TypeError('repo must use OWNER/REPO format');
@@ -1035,6 +1038,15 @@ function validateSubmission(options) {
   const validatedBody = nonEmptyString(body, 'body');
   if (!Array.isArray(comments)) throw new TypeError('comments must be an array');
   if (typeof execute !== 'function') throw new TypeError('execute must be a function');
+  if (typeof authorizeWrite !== 'function') {
+    throw new TypeError('authorizeWrite must be a function');
+  }
+  if (signal !== undefined
+    && (typeof signal !== 'object'
+      || typeof signal.aborted !== 'boolean'
+      || typeof signal.addEventListener !== 'function')) {
+    throw new TypeError('signal must be an AbortSignal');
+  }
   const recomputed = prepareReview(report, diff, gates, verification, triggerId);
   if (validatedBody !== recomputed.body
     || JSON.stringify(comments) !== JSON.stringify(recomputed.comments)) {
@@ -1049,6 +1061,8 @@ function validateSubmission(options) {
     body: recomputed.body,
     comments: recomputed.comments.map(validateComment),
     execute,
+    authorizeWrite,
+    signal,
   };
 }
 
@@ -1102,6 +1116,8 @@ export async function submitReview(options) {
       expectedHeadSha: validated.headSha,
       execute: validated.execute,
     });
+    await validated.authorizeWrite();
+    if (validated.signal?.aborted) throw validated.signal.reason;
     const response = await validated.execute('gh', [
       'api',
       '--method',
@@ -1109,7 +1125,7 @@ export async function submitReview(options) {
       `repos/${validated.repo}/pulls/${validated.number}/reviews`,
       '--input',
       payloadFile,
-    ]);
+    ], { signal: validated.signal });
     return parseReviewResponse(response, validated.event);
   } finally {
     await rm(directory, { recursive: true, force: true });

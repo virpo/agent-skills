@@ -48,9 +48,10 @@ export const SYNTHESIS_BUDGET_MS = 10 * 60_000;
 export const REVIEWER_INACTIVITY_TIMEOUT_MS = 5 * 60_000;
 export const HEARTBEAT_INTERVAL_MS = 60_000;
 
-const defaultExecute = (command, args) => execFileAsync(command, args, {
+const defaultExecute = (command, args, { signal } = {}) => execFileAsync(command, args, {
   encoding: 'utf8',
   maxBuffer: 10 * 1024 * 1024,
+  signal,
 });
 
 export const ANGLE_SLUGS = Object.freeze([
@@ -240,7 +241,13 @@ export async function runTrigger(options) {
     if (captured.stale) {
       if (!options.dryRun && !quietUntilComplete) {
         await authorizeWrite();
-        await marker.stale({ trigger, context, actualHeadSha: captured.actualHeadSha });
+        await marker.stale({
+          trigger,
+          context,
+          actualHeadSha: captured.actualHeadSha,
+          authorizeWrite,
+          signal: controller.signal,
+        });
       }
       return { status: 'stale', actualHeadSha: captured.actualHeadSha };
     }
@@ -251,7 +258,12 @@ export async function runTrigger(options) {
 
     if (!quietUntilComplete) {
       await authorizeWrite();
-      await marker.working({ trigger, context });
+      await marker.working({
+        trigger,
+        context,
+        authorizeWrite,
+        signal: controller.signal,
+      });
       markerStarted = true;
     }
     if (controller.signal.aborted) throw controller.signal.reason;
@@ -363,7 +375,13 @@ export async function runTrigger(options) {
     if (current?.headSha !== trigger.headSha) {
       if (!quietUntilComplete) {
         await authorizeWrite();
-        await marker.stale({ trigger, context, actualHeadSha: current?.headSha });
+        await marker.stale({
+          trigger,
+          context,
+          actualHeadSha: current?.headSha,
+          authorizeWrite,
+          signal: controller.signal,
+        });
       }
       return { status: 'stale', actualHeadSha: current?.headSha };
     }
@@ -384,9 +402,22 @@ export async function runTrigger(options) {
     }
     const gatedSynthesis = { ...synthesis, gates: hostGates };
     await authorizeWrite();
-    const submission = await github.submit({ trigger, context, synthesis: gatedSynthesis });
+    const submission = await github.submit({
+      trigger,
+      context,
+      synthesis: gatedSynthesis,
+      authorizeWrite,
+      signal: controller.signal,
+    });
     await authorizeWrite();
-    await marker.complete({ trigger, context, synthesis: gatedSynthesis, submission });
+    await marker.complete({
+      trigger,
+      context,
+      synthesis: gatedSynthesis,
+      submission,
+      authorizeWrite,
+      signal: controller.signal,
+    });
     await state.success(trigger);
     log(logger, {
       event: 'complete',
@@ -409,6 +440,7 @@ export async function runTrigger(options) {
           reason,
           category,
           nextEligibleAt: failure.nextEligibleAt,
+          authorizeWrite: () => authorizeWrite({ honorAbort: false }),
         });
       } catch (markerError) {
         log(logger, {
@@ -538,12 +570,26 @@ function createStateAdapter({ stateDir, now = () => Date.now() }) {
   };
 }
 
-async function writeMarker({ repo, number, body, execute }) {
+async function writeMarker({
+  repo,
+  number,
+  body,
+  execute,
+  authorizeWrite,
+  signal,
+}) {
   const directory = await mkdtemp(join(tmpdir(), 'blast-radius-buddy-marker-'));
   const bodyFile = join(directory, 'body.md');
   try {
     await writeFile(bodyFile, body, { encoding: 'utf8', mode: 0o600 });
-    return await upsertReviewComment({ repo, pr: number, bodyFile, execute });
+    return await upsertReviewComment({
+      repo,
+      pr: number,
+      bodyFile,
+      execute,
+      authorizeWrite,
+      signal,
+    });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -561,43 +607,45 @@ function reportSummary(report) {
 }
 
 function createMarkerAdapter({ execute, expectedReviewer }) {
-  const update = async (trigger, body) => {
+  const update = async (trigger, body, authorizeWrite, signal) => {
     await assertGithubIdentity({ execute, expectedReviewer });
     return writeMarker({
       repo: trigger.repo,
       number: trigger.number,
       body,
       execute,
+      authorizeWrite,
+      signal,
     });
   };
   return {
-    working: ({ trigger }) => update(trigger, buildProgressBody({
+    working: ({ trigger, authorizeWrite, signal }) => update(trigger, buildProgressBody({
       headSha: trigger.headSha,
       triggerId: trigger.triggerId,
-    })),
-    retry: ({ trigger, reason, nextEligibleAt }) => update(trigger, buildRetryBody({
+    }), authorizeWrite, signal),
+    retry: ({ trigger, reason, nextEligibleAt, authorizeWrite, signal }) => update(trigger, buildRetryBody({
       headSha: trigger.headSha,
       triggerId: trigger.triggerId,
       reason,
       nextEligibleAt,
-    })),
-    incomplete: ({ trigger, reason, action }) => update(trigger, buildIncompleteBody({
+    }), authorizeWrite, signal),
+    incomplete: ({ trigger, reason, action, authorizeWrite, signal }) => update(trigger, buildIncompleteBody({
       headSha: trigger.headSha,
       triggerId: trigger.triggerId,
       reason,
       action,
-    })),
-    stale: ({ trigger, actualHeadSha }) => update(trigger, buildStaleBody({
+    }), authorizeWrite, signal),
+    stale: ({ trigger, actualHeadSha, authorizeWrite, signal }) => update(trigger, buildStaleBody({
       oldSha: trigger.headSha,
       newSha: actualHeadSha,
       triggerId: trigger.triggerId,
-    })),
-    complete: ({ trigger, synthesis, submission }) => update(trigger, buildFinalBody({
+    }), authorizeWrite, signal),
+    complete: ({ trigger, synthesis, submission, authorizeWrite, signal }) => update(trigger, buildFinalBody({
       headSha: trigger.headSha,
       triggerId: trigger.triggerId,
       summary: reportSummary(synthesis.report),
       reviewUrl: submission.reviewUrl,
-    })),
+    }), authorizeWrite, signal),
   };
 }
 
@@ -800,8 +848,8 @@ async function createReviewerAdapter({ logger } = {}) {
         let value;
         try {
           value = JSON.parse(output);
-        } catch (error) {
-          throw new Error(`Invalid JSON in structured brb-review output: ${error.message}`);
+        } catch {
+          throw new Error('Invalid JSON in structured brb-review output');
         }
         return validateReviewResult(value, angle);
       },
@@ -885,7 +933,7 @@ function createGithubAdapter({ execute, repository, expectedReviewer }) {
           .map((check) => check?.name ?? 'unknown'),
       };
     },
-    submit: async ({ trigger, context, synthesis }) => {
+    submit: async ({ trigger, context, synthesis, authorizeWrite, signal }) => {
       await assertGithubIdentity({ execute, expectedReviewer });
       const prepared = prepareReview(
         synthesis.report,
@@ -905,6 +953,8 @@ function createGithubAdapter({ execute, repository, expectedReviewer }) {
         body: prepared.body,
         comments: prepared.comments,
         execute,
+        authorizeWrite,
+        signal,
       });
       return { ...prepared, ...submitted };
     },

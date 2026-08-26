@@ -413,6 +413,27 @@ test('wrong GitHub identity blocks every quiet-mode publication', async () => {
   assert.equal(events.some((event) => String(event).startsWith('github:submit:')), false);
 });
 
+test('publication adapters receive a live write-boundary authorization callback', async () => {
+  const { options } = harness({ quietUntilComplete: true });
+  let submitAuthorized = false;
+  let markerAuthorized = false;
+  options.github.submit = async ({ authorizeWrite }) => {
+    await authorizeWrite();
+    submitAuthorized = true;
+    return { event: 'APPROVE', reviewUrl: 'https://example.test/review/1' };
+  };
+  options.marker.complete = async ({ authorizeWrite }) => {
+    await authorizeWrite();
+    markerAuthorized = true;
+  };
+
+  const result = await runTrigger(options);
+
+  assert.equal(result.status, 'complete');
+  assert.equal(submitAuthorized, true);
+  assert.equal(markerAuthorized, true);
+});
+
 test('dry-run captures eligibility but performs no marker or reviewer write', async () => {
   const { events, options } = harness({ dryRun: true });
   options.reviewers.assess = async () => assert.fail('reviewer must not start');
