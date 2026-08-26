@@ -415,6 +415,10 @@ export async function runTrigger(options) {
               ...request,
               model: options.codexModel,
               replacementFor: 'claude',
+              stageDeadlineAt: Math.min(
+                lease.deadlineAt,
+                now() + ANGLE_WAVE_BUDGET_MS,
+              ),
             });
           }
         });

@@ -341,16 +341,29 @@ test('a rejected heartbeat aborts every angle and schedules safe recovery', asyn
 });
 
 test('a failed Opus angle gets exactly one Codex replacement for the same angle', async () => {
-  const { events, options } = harness();
+  let currentTime = 1_000;
+  const { events, options } = harness({ now: () => currentTime });
+  options.state.acquire = async () => ({
+    acquired: true,
+    ownerId: 'owner-1',
+    deadlineAt: 2_000_000,
+  });
   let opusCalls = 0;
+  let opusDeadline;
+  let replacementDeadline;
   const originalCodex = options.reviewers.reviewCodex;
-  options.reviewers.reviewClaude = async ({ angle }) => {
+  options.reviewers.reviewClaude = async ({ angle, stageDeadlineAt }) => {
     opusCalls += 1;
+    opusDeadline = stageDeadlineAt;
+    currentTime = stageDeadlineAt;
     events.push(`claude:${angle}:failed`);
     throw new Error('Opus unavailable');
   };
   options.reviewers.reviewCodex = async (request) => {
-    if (request.replacementFor === 'claude') events.push(`codex:replacement:${request.angle}`);
+    if (request.replacementFor === 'claude') {
+      events.push(`codex:replacement:${request.angle}`);
+      replacementDeadline = request.stageDeadlineAt;
+    }
     return originalCodex(request);
   };
 
@@ -358,6 +371,8 @@ test('a failed Opus angle gets exactly one Codex replacement for the same angle'
   assert.equal(result.status, 'complete');
   assert.equal(opusCalls, 1);
   assert.ok(events.includes('codex:replacement:system-blast-radius'));
+  assert.ok(replacementDeadline > opusDeadline);
+  assert.equal(replacementDeadline, currentTime + coordinatorModule.ANGLE_WAVE_BUDGET_MS);
   assert.ok(events.includes('codex:synthesis'));
 });
 
