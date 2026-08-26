@@ -8,6 +8,7 @@ import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import {
+  buildCodexSandboxProfile,
   CLAUDE_REVIEW_ARGS,
   CLAUDE_REPOSITORY_REVIEW_ARGS,
   CODEX_REVIEW_ARGS,
@@ -922,7 +923,8 @@ test('launchCodex uses fixed isolated arguments, minimal environment, and stdin 
   assert.deepEqual(calls[0].command, 'codex');
   assert.deepEqual(CODEX_REVIEW_ARGS, [
     'exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only',
-    '--skip-git-repo-check', '--model', 'gpt-5.6-sol', '-',
+    '--ignore-rules', '--skip-git-repo-check', '--model', 'gpt-5.6-sol',
+    '-c', 'shell_environment_policy.inherit=none', '-',
   ]);
   assert.deepEqual(calls[0].args, CODEX_REVIEW_ARGS);
   assert.equal(calls[0].args.includes('prompt bytes ; $(never)'), false);
@@ -941,6 +943,7 @@ test('launchCodex uses fixed isolated arguments, minimal environment, and stdin 
 
 test('launchCodex repository mode roots the read-only sandbox at the neutral workspace', async () => {
   const calls = [];
+  let cleaned = 0;
   const output = await launchCodex(
     {
       cwd: '/exact/review-workspace',
@@ -950,6 +953,16 @@ test('launchCodex repository mode roots the read-only sandbox at the neutral wor
     {
       model: 'gpt-5.6-sol',
       repositoryAccess: true,
+      prepareSandbox: async () => ({
+        command: '/usr/bin/sandbox-exec',
+        prefixArgs: ['-f', '/private/profile.sb', 'codex'],
+        environmentOverrides: {
+          HOME: '/private/runtime',
+          CODEX_HOME: '/private/runtime',
+          TMPDIR: '/private/runtime/tmp',
+        },
+        cleanup: async () => { cleaned += 1; },
+      }),
       spawnImpl: (command, args, options) => {
         calls.push({ command, args, options });
         return fakeChild({ stdout: 'complete' });
@@ -958,14 +971,36 @@ test('launchCodex repository mode roots the read-only sandbox at the neutral wor
   );
 
   assert.equal(output, 'complete');
+  assert.equal(calls[0].command, '/usr/bin/sandbox-exec');
   assert.deepEqual(calls[0].args, [
+    '-f', '/private/profile.sb', 'codex',
     'exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only',
-    '--skip-git-repo-check', '--model', 'gpt-5.6-sol',
+    '--ignore-rules', '--skip-git-repo-check', '--model', 'gpt-5.6-sol',
+    '-c', 'shell_environment_policy.inherit=none',
     '-C', '/exact/review-workspace', '-',
   ]);
   assert.equal(calls[0].options.cwd, '/exact/review-workspace');
   assert.equal(Object.hasOwn(calls[0].options.env, 'GH_TOKEN'), false);
   assert.equal(Object.hasOwn(calls[0].options.env, 'GITHUB_TOKEN'), false);
+  assert.equal(calls[0].options.env.HOME, '/private/runtime');
+  assert.equal(calls[0].options.env.CODEX_HOME, '/private/runtime');
+  assert.equal(cleaned, 1);
+});
+
+test('Codex sandbox profile denies host home and temp reads except explicit roots', () => {
+  const profile = buildCodexSandboxProfile({
+    hostHome: '/Users/reviewer',
+    hostTemp: '/private/var/tmp',
+    runtimeRoot: '/private/var/tmp/runtime-secret',
+    nodeRuntimeRoot: '/Users/reviewer/.nvm/versions/node/v24',
+    workspaceRoot: '/private/var/tmp/review-workspace',
+  });
+
+  assert.match(profile, /deny file-read-data.*\/Users\/reviewer/s);
+  assert.match(profile, /deny file-read-data.*\/private\/var\/tmp/s);
+  assert.match(profile, /allow file-read-data.*runtime-secret/s);
+  assert.match(profile, /allow file-read-data.*review-workspace/s);
+  assert.match(profile, /allow file-read-data.*\.nvm\/versions\/node\/v24/s);
 });
 
 test('launchCodex labels output-cap and child-exit failures', async () => {

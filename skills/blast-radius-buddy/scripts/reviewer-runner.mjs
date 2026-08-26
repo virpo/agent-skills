@@ -2,13 +2,17 @@
 
 import { spawn } from 'node:child_process';
 import {
+  chmod,
+  copyFile,
+  mkdir,
   mkdtemp,
   readFile as readFileDefault,
+  realpath,
   rm,
   writeFile as writeFileDefault,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -21,6 +25,7 @@ import {
 } from './review-protocol.mjs';
 
 const REVIEW_DIRECTORY_PREFIX = join(tmpdir(), 'blast-radius-buddy-review-');
+const CODEX_RUNTIME_PREFIX = join(tmpdir(), 'blast-radius-buddy-codex-runtime-');
 const MAX_CAPTURE_BYTES = 10 * 1024 * 1024;
 const BASE_REVIEW_ENV_KEYS = [
   'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'USER', 'LOGNAME', 'SHELL',
@@ -48,7 +53,8 @@ export const CLAUDE_REPOSITORY_REVIEW_ARGS = Object.freeze([
 ]);
 export const CODEX_REVIEW_ARGS = Object.freeze([
   'exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only',
-  '--skip-git-repo-check', '--model', 'gpt-5.6-sol', '-',
+  '--ignore-rules', '--skip-git-repo-check', '--model', 'gpt-5.6-sol',
+  '-c', 'shell_environment_policy.inherit=none', '-',
 ]);
 
 export class UnterminatedReviewerChildError extends Error {
@@ -276,6 +282,7 @@ function launchReviewerChild(
     command,
     args,
     environmentKeys,
+    environmentOverrides = {},
     spawnImpl = spawn,
     termGraceMs = 1_000,
     killGuardMs = 1_000,
@@ -400,7 +407,7 @@ function launchReviewerChild(
       child = spawnImpl(command, args, {
         cwd,
         shell: false,
-        env: minimalEnvironment(environmentKeys),
+        env: { ...minimalEnvironment(environmentKeys), ...environmentOverrides },
       });
       child.stdout.on('data', captureStdout);
       child.stderr.on('data', captureStderr);
@@ -469,9 +476,96 @@ export async function launchClaude(
   return parseClaudeStream(output);
 }
 
-export function launchCodex(
+function schemeString(value) {
+  return JSON.stringify(value);
+}
+
+export function buildCodexSandboxProfile({
+  hostHome,
+  hostTemp,
+  runtimeRoot,
+  nodeRuntimeRoot,
+  workspaceRoot,
+}) {
+  for (const [label, value] of Object.entries({
+    hostHome, hostTemp, runtimeRoot, nodeRuntimeRoot, workspaceRoot,
+  })) {
+    if (typeof value !== 'string' || !isAbsolute(value)) {
+      throw new TypeError(`${label} must be an absolute path`);
+    }
+  }
+  return [
+    '(version 1)',
+    '(allow default)',
+    `(deny file-read-data (subpath ${schemeString(hostHome)}))`,
+    `(deny file-read-data (subpath ${schemeString(hostTemp)}))`,
+    `(allow file-read-data (subpath ${schemeString(nodeRuntimeRoot)}))`,
+    `(allow file-read-data (subpath ${schemeString(runtimeRoot)}))`,
+    `(allow file-read-data (subpath ${schemeString(workspaceRoot)}))`,
+    '',
+  ].join('\n');
+}
+
+async function prepareCodexSandbox({ cwd }) {
+  const hostHome = process.env.HOME;
+  if (typeof hostHome !== 'string' || !isAbsolute(hostHome)) {
+    throw new Error('Codex review requires an absolute host HOME');
+  }
+  const runtimeRoot = await mkdtemp(CODEX_RUNTIME_PREFIX);
+  const profileRoot = await mkdtemp(join(hostHome, '.blast-radius-buddy-codex-profile-'));
+  const runtimeTemp = join(runtimeRoot, 'tmp');
+  const profilePath = join(profileRoot, 'review.sb');
+  try {
+    await mkdir(runtimeTemp, { mode: 0o700 });
+    const sourceHome = process.env.CODEX_HOME ?? join(hostHome, '.codex');
+    const sourceAuth = join(sourceHome, 'auth.json');
+    const runtimeAuth = join(runtimeRoot, 'auth.json');
+    try {
+      await copyFile(sourceAuth, runtimeAuth);
+      await chmod(runtimeAuth, 0o600);
+    } catch (error) {
+      if (process.env.OPENAI_API_KEY === undefined) throw error;
+    }
+    const profile = buildCodexSandboxProfile({
+      hostHome: await realpath(hostHome),
+      hostTemp: await realpath(tmpdir()),
+      runtimeRoot: await realpath(runtimeRoot),
+      nodeRuntimeRoot: await realpath(resolve(dirname(process.execPath), '..')),
+      workspaceRoot: await realpath(cwd),
+    });
+    await writeFileDefault(profilePath, profile, { encoding: 'utf8', mode: 0o600 });
+    return {
+      command: '/usr/bin/sandbox-exec',
+      prefixArgs: ['-f', profilePath, 'codex'],
+      environmentOverrides: {
+        HOME: runtimeRoot,
+        CODEX_HOME: runtimeRoot,
+        TMPDIR: runtimeTemp,
+      },
+      cleanup: async () => {
+        await Promise.all([
+          rm(runtimeRoot, { recursive: true, force: true }),
+          rm(profileRoot, { recursive: true, force: true }),
+        ]);
+      },
+    };
+  } catch (error) {
+    await Promise.all([
+      rm(runtimeRoot, { recursive: true, force: true }),
+      rm(profileRoot, { recursive: true, force: true }),
+    ]);
+    throw error;
+  }
+}
+
+export async function launchCodex(
   options,
-  { model, repositoryAccess = false, ...dependencies } = {},
+  {
+    model,
+    repositoryAccess = false,
+    prepareSandbox = prepareCodexSandbox,
+    ...dependencies
+  } = {},
 ) {
   if (typeof model !== 'string' || model.trim().length === 0) {
     throw new TypeError('Codex model must be a non-empty string');
@@ -481,17 +575,28 @@ export function launchCodex(
   }
   const args = [
     'exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only',
-    '--skip-git-repo-check', '--model', model,
+    '--ignore-rules', '--skip-git-repo-check', '--model', model,
+    '-c', 'shell_environment_policy.inherit=none',
     ...(repositoryAccess ? ['-C', options.cwd] : []),
     '-',
   ];
-  return launchReviewerChild(options, {
-    ...dependencies,
-    provider: 'Codex',
-    command: 'codex',
-    args,
-    environmentKeys: CODEX_ENV_KEYS,
-  });
+  const sandbox = repositoryAccess ? await prepareSandbox({ cwd: options.cwd }) : undefined;
+  let error;
+  try {
+    return await launchReviewerChild(options, {
+      ...dependencies,
+      provider: 'Codex',
+      command: sandbox?.command ?? 'codex',
+      args: [...(sandbox?.prefixArgs ?? []), ...args],
+      environmentKeys: CODEX_ENV_KEYS,
+      environmentOverrides: sandbox?.environmentOverrides,
+    });
+  } catch (caught) {
+    error = caught;
+    throw caught;
+  } finally {
+    if (sandbox && error?.name !== 'UnterminatedReviewerChildError') await sandbox.cleanup();
+  }
 }
 
 function usage() {
