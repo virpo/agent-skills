@@ -63,10 +63,74 @@ export const CODEX_PLAN_OUTPUT_SCHEMA = Object.freeze({
   type: 'object',
   properties: {
     status: { type: 'string', enum: ['complete', 'needs-context'] },
+    headSha: { type: 'string' },
+    triggerId: { type: 'string' },
+    intent: { type: 'string' },
+    boundaries: { type: 'array', items: { type: 'string' } },
+    clusters: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          risk: { type: 'string', enum: ['low', 'medium', 'high'] },
+          reason: { type: 'string' },
+          changedFiles: { type: 'array', items: { type: 'string' } },
+          relatedFiles: { type: 'array', items: { type: 'string' } },
+          tests: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['id', 'risk', 'reason', 'changedFiles', 'relatedFiles', 'tests'],
+        additionalProperties: false,
+      },
+    },
+    fileDispositions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          disposition: { type: 'string', enum: ['material', 'mechanical', 'low-risk'] },
+          clusterId: { type: ['string', 'null'] },
+          reason: { type: 'string' },
+        },
+        required: ['path', 'disposition', 'clusterId', 'reason'],
+        additionalProperties: false,
+      },
+    },
+    assignments: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          angle: { type: 'string', enum: ANGLE_SLUGS },
+          provider: { type: 'string', enum: ['codex', 'claude'] },
+          reason: { type: 'string' },
+        },
+        required: ['angle', 'provider', 'reason'],
+        additionalProperties: false,
+      },
+    },
+    missingContext: { type: 'array', items: { type: 'string' } },
   },
-  required: ['status'],
+  required: [
+    'status', 'headSha', 'triggerId', 'intent', 'boundaries', 'clusters',
+    'fileDispositions', 'assignments', 'missingContext',
+  ],
   additionalProperties: false,
 });
+
+export function normalizeStructuredReviewPlan(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)
+    || value.status !== 'needs-context') {
+    return value;
+  }
+  return {
+    status: value.status,
+    headSha: value.headSha,
+    triggerId: value.triggerId,
+    missingContext: value.missingContext,
+  };
+}
 
 class WholeRunDeadlineError extends Error {
   constructor() {
@@ -751,7 +815,7 @@ function assessmentPrompt({ context, workspace }) {
     'Use sequential cluster IDs cluster-1, cluster-2, and so on. File disposition is exactly material, mechanical, or low-risk. Cluster risk is exactly low, medium, or high. Every material file names its cluster ID.',
     'Assign all three canonical angles exactly once: security-and-abuse, system-blast-radius, and feature-truth-and-adjacent-regressions. Assign exactly one highest-risk angle to provider claude and the other two to provider codex.',
     'Return only the required brb-plan JSON object as raw JSON with no Markdown fence or prose. A complete result uses exactly status, headSha, triggerId, intent, boundaries, clusters, fileDispositions, assignments, and missingContext. Each cluster uses exactly id, risk, reason, changedFiles, relatedFiles, and tests. Each file disposition uses exactly path, disposition, clusterId, and reason. Each assignment uses exactly angle, provider, and reason. Complete results use an empty missingContext array.',
-    'For exact missing repository state use only status, headSha, triggerId, and a non-empty missingContext array. Do not edit, comment, approve, request changes, resolve, push, merge, or infer authorization.',
+    'For exact missing repository state use status needs-context, repeat headSha and triggerId, provide a non-empty missingContext array, and use empty placeholders for intent, boundaries, clusters, fileDispositions, and assignments. Do not edit, comment, approve, request changes, resolve, push, merge, or infer authorization.',
   ].join('\n\n');
 }
 
@@ -840,7 +904,9 @@ async function createReviewerAdapter({ logger } = {}) {
         repositoryAccess: true,
         jsonSchema: CODEX_PLAN_OUTPUT_SCHEMA,
       }),
-      validate: (output) => validateReviewPlan(parseStructuredModelJson(output, 'brb-plan'), {
+      validate: (output) => validateReviewPlan(normalizeStructuredReviewPlan(
+        parseStructuredModelJson(output, 'brb-plan'),
+      ), {
         headSha: context.headSha,
         triggerId: context.triggerId,
         changedFiles: context.files.map((file) => typeof file === 'string' ? file : file.path),

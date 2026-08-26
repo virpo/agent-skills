@@ -8,6 +8,7 @@ import {
   bindSynthesisHostGates,
   captureContext,
   main,
+  normalizeStructuredReviewPlan,
   runQueue,
   runTrigger,
 } from '../skills/blast-radius-buddy/scripts/review-coordinator.mjs';
@@ -215,13 +216,35 @@ test('coordinator exports bounded stage timing', () => {
 });
 
 test('Codex assessment schema is strict enough for structured output', () => {
-  assert.deepEqual(coordinatorModule.CODEX_PLAN_OUTPUT_SCHEMA, {
-    type: 'object',
-    properties: {
-      status: { type: 'string', enum: ['complete', 'needs-context'] },
-    },
-    required: ['status'],
-    additionalProperties: false,
+  const schema = coordinatorModule.CODEX_PLAN_OUTPUT_SCHEMA;
+  assert.equal(schema.type, 'object');
+  assert.equal(schema.additionalProperties, false);
+  assert.deepEqual(schema.required.toSorted(), Object.keys(schema.properties).sort());
+  for (const property of ['clusters', 'fileDispositions', 'assignments']) {
+    assert.equal(schema.properties[property].items.additionalProperties, false);
+    assert.deepEqual(
+      schema.properties[property].items.required.toSorted(),
+      Object.keys(schema.properties[property].items.properties).sort(),
+    );
+  }
+});
+
+test('needs-context structured plans discard required placeholder fields before validation', () => {
+  assert.deepEqual(normalizeStructuredReviewPlan({
+    status: 'needs-context',
+    headSha: HEAD,
+    triggerId: TRIGGER.triggerId,
+    intent: '',
+    boundaries: [],
+    clusters: [],
+    fileDispositions: [],
+    assignments: [],
+    missingContext: ['The generated API contract is absent.'],
+  }), {
+    status: 'needs-context',
+    headSha: HEAD,
+    triggerId: TRIGGER.triggerId,
+    missingContext: ['The generated API contract is absent.'],
   });
 });
 
