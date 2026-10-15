@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Price Review</title>
+<style>
+  :root {
+    --bg: #F2F1EE; --card: #FFFFFF; --ink: #161616; --mute: #7D7A74; --line: #E1DED8;
+    --acc: #18A957; --bad: #C2410C; --field: #FAFAF8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151515; --card: #1E1E1E; --ink: #F1F0ED; --mute: #9A978F; --line: #33312E; --field: #181818; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 880px; margin: 0 auto; padding: 32px 16px 120px; }
+  header { position: sticky; top: 0; z-index: 2; background: var(--bg); padding: 12px 0; display: flex; flex-wrap: wrap; gap: 12px; align-items: end; justify-content: space-between; margin-bottom: 20px; }
+  h1 { margin: 0; font-size: 28px; letter-spacing: -0.02em; }
+  .sum { color: var(--mute); }
+  .sum b { color: var(--ink); }
+  button { font: inherit; border: 0; border-radius: 10px; padding: 10px 16px; cursor: pointer; background: var(--ink); color: var(--bg); font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  .item { display: grid; grid-template-columns: 168px 1fr; gap: 18px; background: var(--card); border-radius: 16px; padding: 16px; margin-bottom: 12px; }
+  .item.off { opacity: .55; }
+  .lead { width: 168px; height: 168px; border-radius: 10px; object-fit: contain; background: var(--line); display: block; }
+  .strip { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
+  .strip img { width: 37px; height: 37px; object-fit: cover; border-radius: 5px; cursor: pointer; opacity: .7; }
+  .strip img.on, .strip img:hover { opacity: 1; outline: 2px solid var(--ink); outline-offset: -2px; }
+  input, textarea { font: inherit; color: inherit; background: var(--field); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; width: 100%; }
+  input:focus, textarea:focus { outline: 2px solid var(--ink); outline-offset: -1px; }
+  .title { font-weight: 600; font-size: 17px; min-height: 0; resize: none; margin: 0; field-sizing: content; }
+  textarea { resize: vertical; min-height: 140px; font-size: 15px; margin-top: 8px; field-sizing: content; max-height: 420px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-top: 10px; }
+  .price { display: flex; align-items: center; gap: 6px; }
+  .price input { width: 110px; font-size: 20px; font-weight: 700; padding: 6px 10px; }
+  .hint { color: var(--mute); font-size: 14px; }
+  .hint b { color: var(--acc); font-weight: 600; }
+  label.sell { display: flex; gap: 6px; align-items: center; font-size: 14px; color: var(--mute); cursor: pointer; }
+  label.sell input { width: auto; }
+  details { margin-top: 10px; font-size: 14px; }
+  summary { cursor: pointer; color: var(--mute); }
+  details ul { margin: 8px 0 0; padding-left: 18px; }
+  details a { color: inherit; }
+  .note { color: var(--bad); font-size: 14px; margin-top: 8px; }
+  .actions { display: flex; align-items: center; gap: 12px; }
+  #status { font-size: 13px; color: var(--mute); }
+  #done-msg { display: none; background: var(--acc); color: #fff; border-radius: 12px; padding: 14px 16px; margin-bottom: 16px; font-weight: 600; }
+  @media (max-width: 600px) {
+    header { position: static; }
+    .item { grid-template-columns: 1fr; }
+    .lead { width: 100%; height: auto; aspect-ratio: 4 / 3; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Price review</h1>
+      <div class="sum" id="sum">Loading…</div>
+    </div>
+    <div class="actions"><span id="status">All changes saved</span><button id="done">I'm done</button></div>
+  </header>
+  <div id="done-msg">Saved. Now tell your agent "done" in the chat.</div>
+  <div id="items"></div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const el = (tag, props = {}, ...kids) => {
+  const n = Object.assign(document.createElement(tag), props);
+  n.append(...kids.filter(k => k != null));
+  return n;
+};
+let data, fmt;
+const status = t => { $('#status').textContent = t; };
+const money = v => (v == null || Number.isNaN(v)) ? '–' : fmt.format(v);
+const photoUrl = f => '/photos/' + f.split('/').map(encodeURIComponent).join('/');
+
+function summary() {
+  const items = data.items || [];
+  const on = items.filter(i => i.include !== false);
+  const total = on.reduce((s, i) => s + (Number(i.price ?? i.suggestedPrice) || 0), 0);
+  $('#sum').innerHTML = '';
+  $('#sum').append(el('b', { textContent: on.length }), ` of ${items.length} items · `, el('b', { textContent: money(total) }), ' if everything sells');
+}
+
+const timers = {}, pending = {};
+async function push(item) {
+  delete pending[item.id];
+  const body = { price: item.price ?? null, title: item.title, description: item.description, include: item.include !== false };
+  try {
+    const r = await fetch('/api/items/' + encodeURIComponent(item.id), { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) throw new Error((await r.json()).error);
+    if (!Object.keys(pending).length) status('All changes saved');
+    return true;
+  } catch (e) { status('Not saved: ' + e.message); return false; }
+}
+function save(item, patch) {
+  Object.assign(item, patch);
+  summary();
+  status('Saving…');
+  pending[item.id] = item;
+  clearTimeout(timers[item.id]);
+  timers[item.id] = setTimeout(() => push(item), 400);
+}
+async function flush() {
+  const items = Object.values(pending);
+  items.forEach(i => clearTimeout(timers[i.id]));
+  return (await Promise.all(items.map(push))).every(Boolean);
+}
+
+function card(item) {
+  const photos = item.photos || [];
+  const lead = el('img', { className: 'lead', alt: item.title || item.id, loading: 'lazy' });
+  if (photos[0]) lead.src = photoUrl(photos[0]);
+  const strip = el('div', { className: 'strip' });
+  photos.slice(0, 8).forEach((f, k) => {
+    const t = el('img', { src: photoUrl(f), alt: '', loading: 'lazy', className: k === 0 ? 'on' : '' });
+    t.onclick = () => { lead.src = t.src; strip.querySelectorAll('img').forEach(x => x.classList.toggle('on', x === t)); };
+    strip.append(t);
+  });
+
+  const title = el('textarea', { className: 'title', value: item.title || '', rows: 2, maxLength: 200, 'aria-label': 'Title' });
+  title.oninput = () => save(item, { title: title.value });
+  const desc = el('textarea', { value: item.description || '', 'aria-label': 'Description' });
+  desc.oninput = () => save(item, { description: desc.value });
+
+  const price = el('input', { type: 'number', min: 0, step: 1, inputMode: 'decimal', value: item.price ?? item.suggestedPrice ?? '', 'aria-label': 'Price' });
+  price.oninput = () => save(item, { price: price.value === '' ? null : Number(price.value) });
+  const range = item.priceRange ? ` · seen ${money(item.priceRange.low)}–${money(item.priceRange.high)}` : '';
+  const hint = el('span', { className: 'hint' }, 'suggested ', el('b', { textContent: money(item.suggestedPrice) }), range);
+
+  const include = el('input', { type: 'checkbox', checked: item.include !== false });
+  const box = el('div', { className: 'item' + (item.include === false ? ' off' : '') });
+  include.onchange = () => { box.classList.toggle('off', !include.checked); save(item, { include: include.checked }); };
+
+  const ev = (item.evidence || []);
+  const why = ev.length || item.priceReason ? el('details', {},
+    el('summary', { textContent: 'Why this price' }),
+    item.priceReason ? el('div', { textContent: item.priceReason, style: 'margin-top:6px' }) : null,
+    ev.length ? el('ul', {}, ...ev.map(e => el('li', {},
+      e.url ? el('a', { href: e.url, target: '_blank', rel: 'noopener', textContent: e.title || e.source }) : (e.title || e.source),
+      ` · ${e.price != null ? money(e.price) : 'no price'}${e.source && e.url ? ' · ' + e.source : ''}${e.match ? ' · ' + e.match + ' match' : ''}`))) : null) : null;
+
+  box.append(
+    el('div', {}, lead, photos.length > 1 ? strip : null),
+    el('div', {},
+      title,
+      el('div', { className: 'row' }, el('div', { className: 'price' }, price, el('span', { className: 'hint', textContent: data.currency || '' })), hint,
+        el('label', { className: 'sell' }, include, 'sell this')),
+      desc,
+      item.condition ? el('div', { className: 'hint', style: 'margin-top:6px', textContent: 'Condition: ' + item.condition }) : null,
+      item.notes ? el('div', { className: 'note', textContent: item.notes }) : null,
+      why));
+  return box;
+}
+
+async function load() {
+  data = await (await fetch('/api/listings')).json();
+  fmt = new Intl.NumberFormat(undefined, { style: 'currency', currency: data.currency || 'EUR', maximumFractionDigits: 0 });
+  $('#items').replaceChildren(...(data.items || []).map(card));
+  summary();
+  if (data.review?.done) $('#done-msg').style.display = 'block';
+}
+
+$('#done').onclick = async () => {
+  $('#done').disabled = true;
+  if (!(await flush())) { $('#done').disabled = false; return; }
+  const r = await fetch('/api/done', { method: 'POST' });
+  $('#done').disabled = false;
+  if (r.ok) { $('#done-msg').style.display = 'block'; status('All changes saved'); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+  else status('Could not mark done');
+};
+
+load().catch(e => { $('#sum').textContent = 'Could not load listings: ' + e.message; });
+</script>
+</body>
+</html>

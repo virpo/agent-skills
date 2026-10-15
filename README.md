@@ -22,6 +22,16 @@ Blast Radius Buddy keeps every prior review visible. Cross-run duplicates requir
 npx skills add virpo/agent-skills --skill blast-radius-buddy
 ```
 
+### 🏷️ Sell My Stuff
+
+Point an agent at a folder of photos of things you don't use. It groups the photos into items, identifies each one, researches comparable prices, writes honest listings, and opens one small review page where you adjust prices. After you approve, it posts to the marketplaces you pick (Facebook Marketplace, Craigslist, eBay, Vinted, Bazoš, Kleinanzeigen and others) in a visible browser while you handle logins.
+
+```bash
+npx skills add virpo/agent-skills --skill sell-my-stuff
+```
+
+Sell My Stuff expects a vision-capable agent, web search, Node for the review page, and a browser tool that can upload files for posting. Without a browser tool it prepares copy-ready listings instead.
+
 ## Compatibility
 
 The skills use the open Agent Skills folder format. They are designed for Codex and Claude Code, and should work in other compatible agent harnesses.

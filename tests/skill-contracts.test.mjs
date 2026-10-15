@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 const root = new URL('../', import.meta.url).pathname;
-const expectedSkills = ['blast-radius-buddy', 'look-hard'];
+const expectedSkills = ['blast-radius-buddy', 'look-hard', 'sell-my-stuff'];
 
 async function readTree(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -18,7 +18,7 @@ async function readTree(directory) {
   return contents.flat().join('\n');
 }
 
-test('repository contains exactly the two release skills', async () => {
+test('repository contains exactly the release skills', async () => {
   const entries = await readdir(join(root, 'skills'), { withFileTypes: true });
   const names = entries
     .filter((entry) => entry.isDirectory())

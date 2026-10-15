@@ -1,0 +1,4 @@
+interface:
+  display_name: "🏷️ Sell My Stuff"
+  short_description: "Turn photos of unused stuff into priced, posted listings"
+  default_prompt: "Use $sell-my-stuff to sell the things in my photos."
