@@ -3,6 +3,7 @@
 // Usage: node review.mjs <listings.json> [--port 4600]
 // Serves the review page on 127.0.0.1 and writes every edit straight back to listings.json.
 
+import { realpathSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { readFile, writeFile, rename, realpath } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, join, resolve, sep } from 'node:path';
@@ -14,6 +15,11 @@ const IMAGE_TYPES = {
   '.webp': 'image/webp', '.gif': 'image/gif', '.avif': 'image/avif',
 };
 const MAX_BODY = 64 * 1024;
+
+// Compare real paths: skills are often installed through a symlink, and import.meta.url is already resolved.
+export function isEntryPoint(moduleUrl) {
+  return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === fileURLToPath(moduleUrl);
+}
 
 export async function readListings(listingsPath) {
   return JSON.parse(await readFile(listingsPath, 'utf8'));
@@ -136,7 +142,7 @@ export function createReviewServer({ listingsPath }) {
   });
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isEntryPoint(import.meta.url)) {
   const args = process.argv.slice(2);
   const listingsPath = args.find(a => !a.startsWith('--'));
   const portFlag = args.indexOf('--port');
