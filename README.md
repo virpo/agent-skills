@@ -32,6 +32,16 @@ npx skills add virpo/agent-skills --skill sell-my-stuff
 
 Sell My Stuff expects a vision-capable agent, web search, Node for the review page, and a browser tool that can upload files for posting. Without a browser tool it prepares copy-ready listings instead.
 
+### 📖 Infinite Book Explainer
+
+Turn one subject (a jet, a locomotive, a castle, a whale) into a living children's encyclopedia page. A huge hand-painted cross-section plate is clickable, and the camera flies into any part. Every deeper level is an image-model repaint of the exact area above it, aligned back so you zoom into the same picture. "How it works" spreads turn out of the painting into diagrams whose parts really move, with watercolour airflow, self-drawing ink arrows and levers a child can pull. The skill ships as a static site, with optional frame-exact video capture.
+
+```bash
+npx skills add virpo/agent-skills --skill infinite-book-explainer
+```
+
+Infinite Book Explainer expects an image model with generation and image-edit modes (the Codex CLI's built-in image tool works), Python 3 with Pillow, NumPy, SciPy and scikit-image, and a browser the agent can drive.
+
 ## Compatibility
 
 The skills use the open Agent Skills folder format. They are designed for Codex and Claude Code, and should work in other compatible agent harnesses.
