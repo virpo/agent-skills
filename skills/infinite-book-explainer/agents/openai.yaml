@@ -1,0 +1,4 @@
+interface:
+  display_name: "📖 Infinite Book Explainer"
+  short_description: "Zoomable painted cross-sections that come alive"
+  default_prompt: "Use $infinite-book-explainer to turn this subject into an interactive, zoomable encyclopedia plate with living how-it-works pages."
